@@ -15,6 +15,9 @@ app.use(cors());
 /** Default express.json() limit (~100kb) rejects multimodal chat payloads (base64 images). */
 app.use(express.json({ limit: '40mb' }));
 app.use(express.urlencoded({ extended: true, limit: '40mb' }));
+app.get('/', (_req, res) => {
+  res.redirect(308, '/api/health');
+});
 app.use('/api', apiRouter);
 app.use((err, _req, res, _next) => {
   const message = err instanceof Error ? err.message : 'Internal server error';

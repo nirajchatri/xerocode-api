@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/XeroCode-Backend
-Environment=API_PORT=8787
+WorkingDirectory=/home/ubuntu/xerocode-api
 Environment=NODE_ENV=production
+EnvironmentFile=-/home/ubuntu/xerocode-api/.env
 ExecStart=/usr/bin/node index.js
 Restart=on-failure
 RestartSec=5

@@ -4,18 +4,44 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const configDir = path.dirname(fileURLToPath(import.meta.url));
-const configPath = path.join(configDir, 'api-endpoints.json');
+
+const resolveApiEndpointsConfigPath = () => {
+  const candidates = [
+    process.env.XEROCODE_API_ENDPOINTS_CONFIG,
+    path.join(configDir, 'api-endpoints.json'),
+    path.resolve(configDir, '../../config/api-endpoints.json'),
+    path.resolve(configDir, '../config/api-endpoints.json'),
+  ]
+    .filter(Boolean)
+    .map((candidate) => path.resolve(String(candidate)));
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    'Missing api-endpoints.json. Edit config/api-endpoints.json at the repo root for local and production API hosts.'
+  );
+};
 
 let cachedConfig;
+let cachedConfigPath;
 
-export const apiEndpointsConfigPath = configPath;
+export function apiEndpointsConfigPath() {
+  if (!cachedConfigPath) {
+    cachedConfigPath = resolveApiEndpointsConfigPath();
+  }
+  return cachedConfigPath;
+}
 
 export function loadApiEndpointsConfig() {
   if (cachedConfig) {
     return cachedConfig;
   }
 
-  cachedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  cachedConfig = JSON.parse(fs.readFileSync(apiEndpointsConfigPath(), 'utf8'));
   return cachedConfig;
 }
 
@@ -34,11 +60,20 @@ function originFromParts(protocol, host, port) {
 }
 
 export function resolveLocalListenConfig(env = process.env) {
-  const local = loadApiEndpointsConfig().local ?? {};
-  const port = normalizePort(env.PORT ?? env.API_PORT ?? local.port, 8787);
+  const cfg = loadApiEndpointsConfig();
+  const local = cfg.local ?? {};
+  const production = cfg.production ?? {};
+  const isProduction = String(env.NODE_ENV || '').trim().toLowerCase() === 'production';
+  const port = normalizePort(
+    env.PORT ?? env.API_PORT ?? (isProduction ? production.port : undefined) ?? local.port,
+    8787
+  );
+  const defaultBindHost = isProduction
+    ? (production.bindHost ?? production.host ?? local.bindHost ?? '0.0.0.0')
+    : (local.bindHost ?? local.host ?? '127.0.0.1');
   const host =
-    String(env.API_HOST ?? env.HOST ?? local.bindHost ?? local.host ?? '127.0.0.1').trim() ||
-    '127.0.0.1';
+    String(env.API_HOST ?? env.HOST ?? defaultBindHost).trim() ||
+    (isProduction ? '0.0.0.0' : '127.0.0.1');
 
   return { host, port };
 }
