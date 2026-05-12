@@ -72,6 +72,7 @@ import {
 } from './apiBuilderSlugRoutes.js';
 import { postAgentStudioWorkflowRun } from './agentStudioWorkflow.js';
 import { postAgentStudioMcpTest } from './agentStudioMcpTest.js';
+import { closeControlSqlServer, connectToControlSqlServer } from './controlDb/sqlserver.js';
 
 export const apiRouter = Router();
 
@@ -105,6 +106,20 @@ apiRouter.use(restrictPublicApiJwtRoutes);
 
 apiRouter.get('/health', (_req, res) => {
   res.json({ ok: true });
+});
+
+apiRouter.get('/health/ready', async (_req, res) => {
+  let pool;
+  try {
+    pool = await connectToControlSqlServer();
+    await pool.request().query('SELECT 1 AS ok');
+    return res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'control database unavailable';
+    return res.status(503).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
 });
 
 apiRouter.post('/agent-studio/workflow/run', postAgentStudioWorkflowRun);

@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 WorkingDirectory=/home/ubuntu/xerocode-api
 Environment=NODE_ENV=production
+Environment=API_HOST=0.0.0.0
+Environment=API_PORT=8787
 EnvironmentFile=-/home/ubuntu/xerocode-api/.env
 ExecStart=/usr/bin/node index.js
 Restart=on-failure
