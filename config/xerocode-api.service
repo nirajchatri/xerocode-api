@@ -1,0 +1,15 @@
+[Unit]
+Description=Xerocode.ai API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/XeroCode-Backend
+Environment=API_PORT=8787
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
