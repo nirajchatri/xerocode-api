@@ -23,13 +23,13 @@ if command -v ufw >/dev/null 2>&1; then
   echo
 fi
 
-cat <<'EOF'
-If both curls return {"ok":true} but https://apis.xerocode.ai still returns 502 (server: awselb/2.0),
-the AWS load balancer is not reaching this host on the target group port.
+if command -v curl >/dev/null 2>&1; then
+  echo "Nginx /api/health via local port 80 (ALB-style HTTP):"
+  curl -fsS -H 'Host: apis.xerocode.ai' 'http://127.0.0.1/api/health' || echo 'nginx did not return JSON on :80'
+  echo
+fi
 
-Check in AWS:
-- Target group protocol HTTP, traffic port 8787 (or 80/443 only if nginx is running here).
-- Health check: HTTP, path /api/health/ready, success codes 200 (use /api/health only for a liveness probe).
-- Registered target is this instance on the same port as traffic.
-- Instance security group allows TCP on that port from the load balancer security group.
+cat <<'EOF'
+If Node curls return JSON but https://apis.xerocode.ai returns nginx 404, reload config/nginx-api.conf,
+remove /etc/nginx/sites-enabled/default, and point the ALB target group at port 80 (HTTP) or 443 (HTTPS).
 EOF

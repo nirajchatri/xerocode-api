@@ -8,9 +8,9 @@ const configDir = path.dirname(fileURLToPath(import.meta.url));
 const resolveApiEndpointsConfigPath = () => {
   const candidates = [
     process.env.XEROCODE_API_ENDPOINTS_CONFIG,
-    path.join(configDir, 'api-endpoints.json'),
     path.resolve(configDir, '../../config/api-endpoints.json'),
     path.resolve(configDir, '../config/api-endpoints.json'),
+    path.join(configDir, 'api-endpoints.json'),
   ]
     .filter(Boolean)
     .map((candidate) => path.resolve(String(candidate)));
@@ -98,6 +98,9 @@ export function resolveProductionApiBaseUrl(env = process.env) {
   }
 
   const production = loadApiEndpointsConfig().production ?? {};
+  if (production.sameOriginApi === true) {
+    return undefined;
+  }
   if (typeof production.baseUrl === 'string' && production.baseUrl.trim()) {
     return production.baseUrl.trim().replace(/\/$/, '');
   }
