@@ -24,12 +24,18 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 
 if command -v curl >/dev/null 2>&1; then
+  echo "API liveness via loopback:"
+  curl -fsS "http://127.0.0.1:8787/api/health" || echo 'Node API is not listening on 127.0.0.1:8787'
+  echo
+
   echo "Nginx /api/health via local port 80 (ALB-style HTTP):"
-  curl -fsS -H 'Host: apis.xerocode.ai' 'http://127.0.0.1/api/health' || echo 'nginx did not return JSON on :80'
+  curl -fsS -H 'Host: apis.xerocode.ai' 'http://127.0.0.1/api/health' || echo 'nginx returned an error (502 usually means the Node API on :8787 is down)'
   echo
 fi
 
 cat <<'EOF'
-If Node curls return JSON but https://apis.xerocode.ai returns nginx 404, reload config/nginx-api.conf,
-remove /etc/nginx/sites-enabled/default, and point the ALB target group at port 80 (HTTP) or 443 (HTTPS).
+If :8787 returns JSON but :80 through nginx does not, reload config/nginx-api.conf and restart nginx.
+If :8787 fails, start or fix the API service:
+  sudo systemctl enable --now xerocode-api
+  sudo journalctl -u xerocode-api -n 50 --no-pager
 EOF

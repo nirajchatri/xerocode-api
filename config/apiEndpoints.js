@@ -5,12 +5,26 @@ import { fileURLToPath } from 'node:url';
 
 const configDir = path.dirname(fileURLToPath(import.meta.url));
 
+const defaultApiEndpointsConfig = () => ({
+  local: {
+    bindHost: '127.0.0.1',
+    host: '127.0.0.1',
+    port: 8787,
+    protocol: 'http',
+  },
+  production: {
+    bindHost: '0.0.0.0',
+    port: 8787,
+    baseUrl: 'https://apis.xerocode.ai',
+  },
+});
+
 const resolveApiEndpointsConfigPath = () => {
   const candidates = [
     process.env.XEROCODE_API_ENDPOINTS_CONFIG,
-    path.resolve(configDir, '../../config/api-endpoints.json'),
-    path.resolve(configDir, '../config/api-endpoints.json'),
     path.join(configDir, 'api-endpoints.json'),
+    path.resolve(configDir, '../config/api-endpoints.json'),
+    path.resolve(configDir, '../../config/api-endpoints.json'),
   ]
     .filter(Boolean)
     .map((candidate) => path.resolve(String(candidate)));
@@ -21,16 +35,14 @@ const resolveApiEndpointsConfigPath = () => {
     }
   }
 
-  throw new Error(
-    'Missing api-endpoints.json. Edit config/api-endpoints.json at the repo root for local and production API hosts.'
-  );
+  return null;
 };
 
 let cachedConfig;
 let cachedConfigPath;
 
 export function apiEndpointsConfigPath() {
-  if (!cachedConfigPath) {
+  if (cachedConfigPath === undefined) {
     cachedConfigPath = resolveApiEndpointsConfigPath();
   }
   return cachedConfigPath;
@@ -41,7 +53,17 @@ export function loadApiEndpointsConfig() {
     return cachedConfig;
   }
 
-  cachedConfig = JSON.parse(fs.readFileSync(apiEndpointsConfigPath(), 'utf8'));
+  const configPath = apiEndpointsConfigPath();
+  if (!configPath) {
+    cachedConfig = defaultApiEndpointsConfig();
+    return cachedConfig;
+  }
+
+  try {
+    cachedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch {
+    cachedConfig = defaultApiEndpointsConfig();
+  }
   return cachedConfig;
 }
 

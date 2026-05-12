@@ -10,7 +10,7 @@ Environment=API_HOST=0.0.0.0
 Environment=API_PORT=8787
 EnvironmentFile=-/home/ubuntu/xerocode-api/.env
 ExecStart=/usr/bin/node index.js
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

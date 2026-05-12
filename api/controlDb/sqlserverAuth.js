@@ -37,6 +37,17 @@ const getOtpEmailConfig = (env = process.env) => {
   return { host, port, secure, user, pass, from, isConfigured: Boolean(pass) };
 };
 
+const formatSmtpSendError = (error) => {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/application-specific password required/i.test(raw) || /534-5\.7\.9/i.test(raw)) {
+    return 'Gmail rejected the SMTP login. Set SMTP_PASS to a Google app password for SMTP_USER, not your normal Gmail password.';
+  }
+  if (/invalid login|authentication failed|username and password not accepted/i.test(raw)) {
+    return 'SMTP login failed. Verify SMTP_USER and SMTP_PASS. For Gmail, use an app password.';
+  }
+  return raw || 'Unable to send password reset email.';
+};
+
 const sendOtpEmail = async ({ toEmail, otpCode, smtp = getOtpEmailConfig() }) => {
   if (!smtp.isConfigured) {
     throw new Error('SMTP password is missing. Set SMTP_PASS (or GMAIL_APP_PASSWORD).');
@@ -48,13 +59,17 @@ const sendOtpEmail = async ({ toEmail, otpCode, smtp = getOtpEmailConfig() }) =>
     secure: smtp.secure,
     auth: { user: smtp.user, pass: smtp.pass },
   });
-  await transporter.sendMail({
-    from: smtp.from,
-    to: toEmail,
-    subject: 'Your OTP for password reset',
-    text: `Your OTP is ${otpCode}. It is valid for 10 minutes.`,
-    html: `<p>Your OTP is <strong>${otpCode}</strong>.</p><p>It is valid for 10 minutes.</p>`,
-  });
+  try {
+    await transporter.sendMail({
+      from: smtp.from,
+      to: toEmail,
+      subject: 'Your OTP for password reset',
+      text: `Your OTP is ${otpCode}. It is valid for 10 minutes.`,
+      html: `<p>Your OTP is <strong>${otpCode}</strong>.</p><p>It is valid for 10 minutes.</p>`,
+    });
+  } catch (error) {
+    throw new Error(formatSmtpSendError(error));
+  }
 };
 
 const ensureSqlServerAuthTables = async (pool) => {
@@ -164,6 +179,46 @@ const ensureSqlServerAuthTables = async (pool) => {
 const nextUserId = async (pool) => {
   const result = await pool.request().query(`SELECT ISNULL(MAX(id), 0) + 1 AS next_id FROM dbo.user_profile`);
   return Number(result.recordset?.[0]?.next_id || 1);
+};
+
+const nextPasswordResetOtpId = async (pool) => {
+  const result = await pool.request().query(`SELECT ISNULL(MAX(id), 0) + 1 AS next_id FROM dbo.password_reset_otp`);
+  return Number(result.recordset?.[0]?.next_id || 1);
+};
+
+const passwordResetOtpIdUsesIdentity = async (pool) => {
+  const result = await pool.request().query(`
+    SELECT CAST(c.is_identity AS bit) AS is_identity
+    FROM sys.columns c
+    INNER JOIN sys.tables t ON t.object_id = c.object_id
+    INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+    WHERE s.name = N'dbo' AND t.name = N'password_reset_otp' AND c.name = N'id'
+  `);
+  return Boolean(result.recordset?.[0]?.is_identity);
+};
+
+const insertPasswordResetOtp = async (pool, email, otpCode) => {
+  const usesIdentity = await passwordResetOtpIdUsesIdentity(pool);
+  if (usesIdentity) {
+    await pool
+      .request()
+      .input('email', sql.NVarChar, email)
+      .input('otp', sql.NVarChar, otpCode).query(`
+        INSERT INTO dbo.password_reset_otp (email, otp_code, expires_at, used, created_at)
+        VALUES (@email, @otp, DATEADD(MINUTE, 10, SYSDATETIME()), 0, SYSDATETIME())
+      `);
+    return;
+  }
+
+  const otpId = await nextPasswordResetOtpId(pool);
+  await pool
+    .request()
+    .input('id', sql.Int, otpId)
+    .input('email', sql.NVarChar, email)
+    .input('otp', sql.NVarChar, otpCode).query(`
+      INSERT INTO dbo.password_reset_otp (id, email, otp_code, expires_at, used, created_at)
+      VALUES (@id, @email, @otp, DATEADD(MINUTE, 10, SYSDATETIME()), 0, SYSDATETIME())
+    `);
 };
 
 const nextTenantId = async (pool) => {
@@ -451,13 +506,7 @@ export const requestPasswordResetOtp = async (req, res) => {
     }
 
     const otpCode = generateNumericOtp();
-    await pool
-      .request()
-      .input('email', sql.NVarChar, email)
-      .input('otp', sql.NVarChar, otpCode).query(`
-        INSERT INTO dbo.password_reset_otp (email, otp_code, expires_at, used, created_at)
-        VALUES (@email, @otp, DATEADD(MINUTE, 10, SYSDATETIME()), 0, SYSDATETIME())
-      `);
+    await insertPasswordResetOtp(pool, email, otpCode);
 
     if (!smtp.isConfigured) {
       return res.json({
