@@ -27,22 +27,29 @@ const normalizeAuthResponseUser = (row, authProvider = 'local') => ({
 
 const generateNumericOtp = () => String(Math.floor(100000 + Math.random() * 900000));
 
-const sendOtpEmail = async ({ toEmail, otpCode }) => {
-  const env = process.env || {};
+const getOtpEmailConfig = (env = process.env) => {
   const host = String(env.SMTP_HOST || 'smtp.gmail.com').trim();
   const port = Number(env.SMTP_PORT || 465) || 465;
   const secure = String(env.SMTP_SECURE || '').trim() === 'true' || port === 465;
   const user = String(env.SMTP_USER || 'xerocode.ai@gmail.com').trim();
   const pass = String(env.SMTP_PASS || env.GMAIL_APP_PASSWORD || '').trim();
-  const from = String(env.SMTP_FROM || 'xerocode.ai@gmail.com').trim();
+  const from = String(env.SMTP_FROM || user).trim();
+  return { host, port, secure, user, pass, from, isConfigured: Boolean(pass) };
+};
 
-  if (!pass) {
+const sendOtpEmail = async ({ toEmail, otpCode, smtp = getOtpEmailConfig() }) => {
+  if (!smtp.isConfigured) {
     throw new Error('SMTP password is missing. Set SMTP_PASS (or GMAIL_APP_PASSWORD).');
   }
 
-  const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
+  const transporter = nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: { user: smtp.user, pass: smtp.pass },
+  });
   await transporter.sendMail({
-    from,
+    from: smtp.from,
     to: toEmail,
     subject: 'Your OTP for password reset',
     text: `Your OTP is ${otpCode}. It is valid for 10 minutes.`,
@@ -156,11 +163,6 @@ const ensureSqlServerAuthTables = async (pool) => {
 
 const nextUserId = async (pool) => {
   const result = await pool.request().query(`SELECT ISNULL(MAX(id), 0) + 1 AS next_id FROM dbo.user_profile`);
-  return Number(result.recordset?.[0]?.next_id || 1);
-};
-
-const nextPasswordResetOtpId = async (pool) => {
-  const result = await pool.request().query(`SELECT ISNULL(MAX(id), 0) + 1 AS next_id FROM dbo.password_reset_otp`);
   return Number(result.recordset?.[0]?.next_id || 1);
 };
 
@@ -427,6 +429,9 @@ export const loginWithGithub = async (req, res) => {
 export const requestPasswordResetOtp = async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   if (!email) return res.status(400).json({ ok: false, message: 'Email is required.' });
+
+  const isProduction = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+  const smtp = getOtpEmailConfig();
   let pool;
   try {
     pool = await connectToControlSqlServer();
@@ -437,21 +442,37 @@ export const requestPasswordResetOtp = async (req, res) => {
     if (!users.recordset?.length) {
       return res.status(404).json({ ok: false, message: 'No account found for this email.' });
     }
+
+    if (isProduction && !smtp.isConfigured) {
+      return res.status(503).json({
+        ok: false,
+        message: 'Password reset email is not configured on the API server. Set SMTP_PASS (or GMAIL_APP_PASSWORD).',
+      });
+    }
+
     const otpCode = generateNumericOtp();
-    const otpId = await nextPasswordResetOtpId(pool);
     await pool
       .request()
-      .input('id', sql.Int, otpId)
       .input('email', sql.NVarChar, email)
       .input('otp', sql.NVarChar, otpCode).query(`
-        INSERT INTO dbo.password_reset_otp (id, email, otp_code, expires_at, used, created_at)
-        VALUES (@id, @email, @otp, DATEADD(MINUTE, 10, SYSDATETIME()), 0, SYSDATETIME())
+        INSERT INTO dbo.password_reset_otp (email, otp_code, expires_at, used, created_at)
+        VALUES (@email, @otp, DATEADD(MINUTE, 10, SYSDATETIME()), 0, SYSDATETIME())
       `);
-    await sendOtpEmail({ toEmail: email, otpCode });
+
+    if (!smtp.isConfigured) {
+      return res.json({
+        ok: true,
+        message: 'OTP generated for development. Email delivery is not configured.',
+        otp: otpCode,
+      });
+    }
+
+    await sendOtpEmail({ toEmail: email, otpCode, smtp });
     return res.json({ ok: true, message: 'OTP sent to your registered email. It is valid for 10 minutes.' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate OTP.';
-    return res.status(500).json({ ok: false, message });
+    const status = /smtp|mail|email/i.test(message) ? 503 : 500;
+    return res.status(status).json({ ok: false, message });
   } finally {
     await closeControlSqlServer(pool);
   }
