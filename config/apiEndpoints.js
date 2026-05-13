@@ -13,18 +13,18 @@ const defaultApiEndpointsConfig = () => ({
     protocol: 'http',
   },
   production: {
+    sameOriginApi: true,
     bindHost: '0.0.0.0',
     port: 8787,
-    baseUrl: 'https://apis.xerocode.ai',
   },
 });
 
 const resolveApiEndpointsConfigPath = () => {
   const candidates = [
     process.env.XEROCODE_API_ENDPOINTS_CONFIG,
-    path.join(configDir, 'api-endpoints.json'),
-    path.resolve(configDir, '../config/api-endpoints.json'),
     path.resolve(configDir, '../../config/api-endpoints.json'),
+    path.resolve(configDir, '../config/api-endpoints.json'),
+    path.join(configDir, 'api-endpoints.json'),
   ]
     .filter(Boolean)
     .map((candidate) => path.resolve(String(candidate)));

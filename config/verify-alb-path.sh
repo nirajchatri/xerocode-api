@@ -31,6 +31,13 @@ if command -v curl >/dev/null 2>&1; then
   echo "Nginx /api/health via local port 80 (ALB-style HTTP):"
   curl -fsS -H 'Host: apis.xerocode.ai' 'http://127.0.0.1/api/health' || echo 'nginx returned an error (502 usually means the Node API on :8787 is down)'
   echo
+
+  echo "Public health probe (5 attempts; alternating 502 means multiple unhealthy ALB targets):"
+  for attempt in 1 2 3 4 5; do
+  status="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 https://apis.xerocode.ai/api/health || echo err)"
+  echo "  attempt ${attempt}: HTTP ${status}"
+  done
+  echo
 fi
 
 cat <<'EOF'
@@ -38,4 +45,5 @@ If :8787 returns JSON but :80 through nginx does not, reload config/nginx-api.co
 If :8787 fails, start or fix the API service:
   sudo systemctl enable --now xerocode-api
   sudo journalctl -u xerocode-api -n 50 --no-pager
+If public probes alternate 200 and 502, deregister unhealthy instances from the ALB target group.
 EOF
