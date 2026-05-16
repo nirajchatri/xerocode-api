@@ -19,17 +19,61 @@ const defaultControlSqlServerConfig = () => {
     options,
     connectionTimeout: 20_000,
     requestTimeout: 20_000,
+    pool: {
+      max: Number(env.SQLSERVER_CONTROL_POOL_MAX || 10) || 10,
+      min: 0,
+      idleTimeoutMillis: 30_000,
+    },
   };
 };
 
-export const connectToControlSqlServer = async () => {
-  const cfg = defaultControlSqlServerConfig();
-  const pool = new sql.ConnectionPool(cfg);
-  await pool.connect();
-  return pool;
+/** @type {import('mssql').ConnectionPool | null} */
+let controlPool = null;
+/** @type {Promise<import('mssql').ConnectionPool> | null} */
+let controlPoolConnecting = null;
+
+const resetControlPool = () => {
+  controlPool = null;
+  controlPoolConnecting = null;
 };
 
-export const closeControlSqlServer = async (pool) => {
+/**
+ * Returns a shared control-database pool. Reuses connections across API requests instead of
+ * opening/closing on every call (reduces timeouts and 502s under load).
+ */
+export const connectToControlSqlServer = async () => {
+  if (controlPool?.connected) return controlPool;
+  if (controlPoolConnecting) return controlPoolConnecting;
+
+  controlPoolConnecting = (async () => {
+    const pool = new sql.ConnectionPool(defaultControlSqlServerConfig());
+    pool.on('error', (err) => {
+      console.error('[control-sql] pool error', err);
+      resetControlPool();
+    });
+    await pool.connect();
+    controlPool = pool;
+    return pool;
+  })();
+
+  try {
+    return await controlPoolConnecting;
+  } catch (error) {
+    resetControlPool();
+    throw error;
+  } finally {
+    controlPoolConnecting = null;
+  }
+};
+
+/** Kept for call-site compatibility; the shared pool stays open for reuse. */
+export const closeControlSqlServer = async (_pool) => {
+  /* no-op */
+};
+
+export const shutdownControlSqlServer = async () => {
+  const pool = controlPool;
+  resetControlPool();
   if (!pool) return;
   try {
     await pool.close();
@@ -37,4 +81,3 @@ export const closeControlSqlServer = async (pool) => {
     /* ignore */
   }
 };
-
