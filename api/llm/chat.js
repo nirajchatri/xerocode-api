@@ -373,3 +373,25 @@ export const testLlmConfig = async (req, res) => {
   }
 };
 
+/** Programmatic LLM call (e.g. public grid natural-language search). */
+export async function invokeLlmChat(body) {
+  return new Promise((resolve, reject) => {
+    let statusCode = 200;
+    const mockRes = {
+      status(code) {
+        statusCode = code;
+        return mockRes;
+      },
+      json(payload) {
+        if (statusCode >= 400 || payload?.ok === false) {
+          reject(new Error(payload?.message || 'LLM request failed.'));
+        } else {
+          resolve(payload);
+        }
+        return payload;
+      },
+    };
+    chatWithLlm({ body: body || {} }, mockRes).catch(reject);
+  });
+}
+

@@ -98,6 +98,23 @@ const ensureSavedWorkspaceTables = async (pool) => {
     END
   `);
   await pool.request().query(`
+    IF OBJECT_ID(N'dbo.builder_public_forms', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.builder_public_forms (
+        slug NVARCHAR(80) NOT NULL PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        title NVARCHAR(512) NOT NULL,
+        schema_connection_id INT NOT NULL,
+        connector_type NVARCHAR(32) NOT NULL,
+        payload_json NVARCHAR(MAX) NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME()),
+        updated_at BIGINT NOT NULL
+      );
+      CREATE INDEX idx_builder_public_forms_owner ON dbo.builder_public_forms (tenant_id, owner_user_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
     IF OBJECT_ID(N'dbo.saved_studio_agents', N'U') IS NULL
     BEGIN
       CREATE TABLE dbo.saved_studio_agents (

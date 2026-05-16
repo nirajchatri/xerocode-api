@@ -90,6 +90,9 @@ export const restrictPublicApiJwtRoutes = (req, res, next) => {
   if (method === 'POST' && /^\/connections\/(\d+)\/table-data\/mutate$/.test(path)) {
     return next();
   }
+  if (method === 'POST' && /^\/connections\/(\d+)\/table-data\/master-detail-save$/.test(path)) {
+    return next();
+  }
   if (method === 'GET' && /^\/connections\/mysql\/(\d+)\/(tables|table-data)$/.test(path)) {
     return next();
   }

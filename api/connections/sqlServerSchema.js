@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { buildSqlServerTlsOptions, parseSqlServerServerInput } from './hostUtils.js';
+import { buildSqlServerWhere } from './tableDataQuery.js';
 
 const buildSqlServerConfig = (row) => {
   const { server, instanceName, port } = parseSqlServerServerInput(row.host, row.port);
@@ -112,6 +113,7 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
     options?.filters && typeof options.filters === 'object' && !Array.isArray(options.filters)
       ? options.filters
       : {};
+  const conditions = Array.isArray(options?.conditions) ? options.conditions : [];
 
   try {
     await pool.connect();
@@ -121,10 +123,24 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
         c.COLUMN_NAME AS column_name,
         c.DATA_TYPE AS data_type,
         c.DATA_TYPE AS column_type,
+        c.IS_NULLABLE AS is_nullable,
         ISNULL(c.COLUMN_DEFAULT, '') AS column_default,
-        '' AS column_key,
+        CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 'PRI' ELSE '' END AS column_key,
         ISNULL(CAST(sep.value AS NVARCHAR(MAX)), '') AS column_comment
       FROM INFORMATION_SCHEMA.COLUMNS c
+      LEFT JOIN (
+        SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME
+        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+          ON tc.CONSTRAINT_SCHEMA = ku.CONSTRAINT_SCHEMA
+          AND tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
+          AND tc.TABLE_SCHEMA = ku.TABLE_SCHEMA
+          AND tc.TABLE_NAME = ku.TABLE_NAME
+        WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+      ) pk
+        ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA
+        AND pk.TABLE_NAME = c.TABLE_NAME
+        AND pk.COLUMN_NAME = c.COLUMN_NAME
       LEFT JOIN sys.columns sc
         ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + N'.' + QUOTENAME(c.TABLE_NAME))
         AND sc.name = c.COLUMN_NAME
@@ -145,33 +161,10 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
       extra: '',
       columnDefault: c.column_default == null ? '' : String(c.column_default),
       comment: c.column_comment == null ? '' : String(c.column_comment).trim(),
+      nullable: String(c.is_nullable ?? c.IS_NULLABLE ?? 'YES').trim().toUpperCase() === 'YES',
     }));
 
-    const colNameSet = new Set(columns.map((c) => c.name));
-    const stringCols = columns.filter((c) => STRING_DATA_TYPES.has(String(c.type || '').toLowerCase()));
-
-    const whereParts = [];
-    const requestParams = [];
-
-    if (search && stringCols.length > 0) {
-      const likeExprs = stringCols.map((c, i) => {
-        const param = `q${i}`;
-        requestParams.push({ name: param, value: `%${search}%` });
-        return `[${c.name.replace(/]/g, '')}] LIKE @${param}`;
-      });
-      whereParts.push(`(${likeExprs.join(' OR ')})`);
-    }
-
-    let filterIdx = 0;
-    for (const [col, val] of Object.entries(filters)) {
-      if (val == null || String(val).trim() === '') continue;
-      if (!colNameSet.has(col)) continue;
-      const param = `f${filterIdx++}`;
-      requestParams.push({ name: param, value: String(val) });
-      whereParts.push(`[${col.replace(/]/g, '')}] = @${param}`);
-    }
-
-    const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+    const { whereClause, requestParams } = buildSqlServerWhere(columns, { search, filters, conditions });
 
     const countReq = pool.request();
     requestParams.forEach((p) => countReq.input(p.name, sql.NVarChar, p.value));

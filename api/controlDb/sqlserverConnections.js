@@ -549,7 +549,21 @@ export const updateConnectionProfile = async (req, res) => {
   }
 };
 
-const isSafeMysqlTableName = (name) => typeof name === 'string' && /^[a-zA-Z0-9_]+$/.test(name);
+/** Allow `table` or `schema.table` for listing APIs (matches FK metadata REFERENCED_* names). */
+const parseMysqlTableRefForDataApi = (raw) => {
+  const t = String(raw ?? '').trim();
+  if (!t) return null;
+  if (!/^([a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+$/.test(t)) return null;
+  if (t.includes('.')) {
+    const [schema, name] = t.split('.');
+    if (!schema || !name || !/^[a-zA-Z0-9_]+$/.test(schema) || !/^[a-zA-Z0-9_]+$/.test(name)) return null;
+    return { schema, table: name };
+  }
+  if (!/^[a-zA-Z0-9_]+$/.test(t)) return null;
+  return { schema: null, table: t };
+};
+
+const qMyIdent = (name) => `\`${String(name).replace(/`/g, '``')}\``;
 
 const formatCellForPreview = (value) => {
   if (value === null || value === undefined) return '';
@@ -580,21 +594,12 @@ const openMysqlTargetConnection = async (row) => {
 
 export const getMySqlTableData = async (req, res) => {
   const { id } = req.params;
-  const table = req.query.table;
+  const tableRaw = req.query.table;
   const limit = Math.min(Math.max(Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50, 1), 5000);
   const offset = Math.max(Number.isFinite(Number(req.query.offset)) ? Number(req.query.offset) : 0, 0);
-  const search = String(req.query.q || '').trim();
-  let filters = {};
-  if (typeof req.query.filters === 'string') {
-    try {
-      const parsed = JSON.parse(req.query.filters);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) filters = parsed;
-    } catch {
-      filters = {};
-    }
-  }
   if (!id) return res.status(400).json({ ok: false, message: 'Missing connection id.' });
-  if (!isSafeMysqlTableName(table)) return res.status(400).json({ ok: false, message: 'Invalid or missing table name.' });
+  const parsed = parseMysqlTableRefForDataApi(tableRaw);
+  if (!parsed) return res.status(400).json({ ok: false, message: 'Invalid or missing table name.' });
 
   let pool;
   let targetConnection;
@@ -610,17 +615,23 @@ export const getMySqlTableData = async (req, res) => {
     if (!profile) return res.status(404).json({ ok: false, message: 'Connection not found.' });
     targetConnection = await openMysqlTargetConnection(profile);
 
+    const schemaName = parsed.schema || String(profile.database_name || '').trim();
+    const tableName = parsed.table;
+    if (!schemaName || !tableName) {
+      return res.status(400).json({ ok: false, message: 'Invalid or missing table name.' });
+    }
+
     const [existsRows] = await targetConnection.query(
-      `SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? AND table_type = 'BASE TABLE' LIMIT 1`,
-      [table]
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ? AND table_type = 'BASE TABLE' LIMIT 1`,
+      [schemaName, tableName]
     );
     if (!Array.isArray(existsRows) || existsRows.length === 0) {
       return res.status(404).json({ ok: false, message: 'Table not found in this database.' });
     }
     const [columnRows] = await targetConnection.query(
-      `SELECT column_name, data_type, column_type, column_key, extra, column_default, column_comment
-       FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position`,
-      [table]
+      `SELECT column_name, data_type, column_type, column_key, extra, column_default, column_comment, is_nullable
+       FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position`,
+      [schemaName, tableName]
     );
     const columns = (columnRows || []).map((c) => ({
       name: c.column_name,
@@ -630,43 +641,19 @@ export const getMySqlTableData = async (req, res) => {
       extra: c.extra || '',
       columnDefault: c.column_default == null ? '' : String(c.column_default),
       comment: c.column_comment == null ? '' : String(c.column_comment).trim(),
+      nullable: String(c.is_nullable ?? c.IS_NULLABLE ?? 'YES').trim().toUpperCase() === 'YES',
     }));
-    const colNameSet = new Set(columns.map((c) => c.name));
-    const STRING_TYPES = new Set([
-      'char',
-      'varchar',
-      'tinytext',
-      'text',
-      'mediumtext',
-      'longtext',
-      'enum',
-      'set',
-      'json',
-    ]);
-    const stringCols = columns.filter((c) => STRING_TYPES.has(String(c.type || '').toLowerCase()));
-    const whereParts = [];
-    const whereParams = [];
-    if (search && stringCols.length > 0) {
-      const orParts = stringCols.map((c) => {
-        whereParams.push(`%${search}%`);
-        return `\`${c.name.replace(/`/g, '``')}\` LIKE ?`;
-      });
-      whereParts.push(`(${orParts.join(' OR ')})`);
-    }
-    for (const [col, val] of Object.entries(filters)) {
-      if (val == null || String(val).trim() === '') continue;
-      if (!colNameSet.has(col)) continue;
-      whereParts.push(`\`${col.replace(/`/g, '``')}\` = ?`);
-      whereParams.push(String(val));
-    }
-    const whereSql = whereParts.length > 0 ? ` WHERE ${whereParts.join(' AND ')}` : '';
+    const { buildMysqlWhere, parseTableDataQueryOptions } = await import('../connections/tableDataQuery.js');
+    const queryOpts = parseTableDataQueryOptions(req.query);
+    const { whereSql, whereParams } = buildMysqlWhere(columns, queryOpts);
+    const fromSql = `${qMyIdent(schemaName)}.${qMyIdent(tableName)}`;
     const [countRows] = await targetConnection.query(
-      `SELECT COUNT(*) AS total FROM \`${table.replace(/`/g, '``')}\`${whereSql}`,
+      `SELECT COUNT(*) AS total FROM ${fromSql}${whereSql}`,
       whereParams
     );
     const total = Number(countRows?.[0]?.total ?? 0);
     const [dataRows] = await targetConnection.query(
-      `SELECT * FROM \`${table.replace(/`/g, '``')}\`${whereSql} LIMIT ? OFFSET ?`,
+      `SELECT * FROM ${fromSql}${whereSql} LIMIT ? OFFSET ?`,
       [...whereParams, limit, offset]
     );
     const rows = (dataRows || []).map((packet) =>

@@ -37,6 +37,25 @@ import {
   saveExternalApiRecord,
 } from './controlDb/sqlserverAppData.js';
 import {
+  getPublicBuilderForm,
+  getPublicBuilderFormFkLookup,
+  getPublicBuilderFormTableData,
+  getPublicBuilderFormTableForeignKeys,
+  publishBuilderPublicForm,
+  submitPublicBuilderForm,
+} from './builderPublicForms.js';
+import {
+  getPublicBuilderApp,
+  getPublicBuilderAppFkLookup,
+  getPublicBuilderAppTableData,
+  getPublicBuilderAppTableForeignKeys,
+  postPublicBuilderAppMutate,
+  postPublicBuilderAppGridSearch,
+  publishBuilderPublicApp,
+  updateBuilderPublicApp,
+  submitPublicBuilderAppScreen,
+} from './builderPublicApps.js';
+import {
   deleteConnectionProfile,
   getMySqlTableData,
   getLlmConfigs,
@@ -56,6 +75,7 @@ import {
   getConnectionTableForeignKeys,
   listConnectionTables,
   mutateConnectionTableData,
+  saveMasterDetailBundle,
 } from './connections/schemaRoutes.js';
 import { chatWithLlm, testLlmConfig } from './llm/chat.js';
 import {
@@ -139,7 +159,22 @@ apiRouter.put('/llm-config', saveLlmConfig);
 apiRouter.post('/llm-config/test', testLlmConfig);
 apiRouter.get('/apps', listSavedApps);
 apiRouter.post('/design-studio/preview', publishDesignStudioPreview);
+apiRouter.post('/builder-forms/publish', publishBuilderPublicForm);
+apiRouter.post('/builder-apps/publish', publishBuilderPublicApp);
+apiRouter.put('/builder-apps/:slug', updateBuilderPublicApp);
 apiRouter.get('/public/design-studio/:slug', getPublicDesignStudioPreview);
+apiRouter.get('/public/builder-apps/:slug', getPublicBuilderApp);
+apiRouter.get('/public/builder-apps/:slug/table-foreign-keys', getPublicBuilderAppTableForeignKeys);
+apiRouter.get('/public/builder-apps/:slug/fk-lookup', getPublicBuilderAppFkLookup);
+apiRouter.get('/public/builder-apps/:slug/table-data', getPublicBuilderAppTableData);
+apiRouter.post('/public/builder-apps/:slug/mutate', postPublicBuilderAppMutate);
+apiRouter.post('/public/builder-apps/:slug/grid-search', postPublicBuilderAppGridSearch);
+apiRouter.post('/public/builder-apps/:slug/submit', submitPublicBuilderAppScreen);
+apiRouter.get('/public/forms/:slug', getPublicBuilderForm);
+apiRouter.get('/public/forms/:slug/table-data', getPublicBuilderFormTableData);
+apiRouter.get('/public/forms/:slug/table-foreign-keys', getPublicBuilderFormTableForeignKeys);
+apiRouter.get('/public/forms/:slug/fk-lookup', getPublicBuilderFormFkLookup);
+apiRouter.post('/public/forms/:slug/submit', submitPublicBuilderForm);
 apiRouter.get('/public/apps/:id', getPublicAppRecord);
 apiRouter.get('/public/apps/:id/table-data', getPublicAppTableData);
 apiRouter.post('/apps', saveAppRecord);
@@ -189,6 +224,7 @@ apiRouter.get('/connections/:id/table-data', enforcePublicApiJwtConnectionScope,
 apiRouter.get('/connections/:id/table-foreign-keys', enforcePublicApiJwtConnectionScope, getConnectionTableForeignKeys);
 apiRouter.get('/connections/:id/fk-lookup', enforcePublicApiJwtConnectionScope, getConnectionFkLookup);
 apiRouter.post('/connections/:id/table-data/mutate', enforcePublicApiJwtConnectionScope, mutateConnectionTableData);
+apiRouter.post('/connections/:id/table-data/master-detail-save', enforcePublicApiJwtConnectionScope, saveMasterDetailBundle);
 
 /** Signed Bearer JWT for external API docs / Postman (scoped to tenant + saved connection profile). */
 apiRouter.post('/public-api-token/issue', issuePublicApiBearerToken);
