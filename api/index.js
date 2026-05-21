@@ -78,6 +78,8 @@ import {
   saveMasterDetailBundle,
 } from './connections/schemaRoutes.js';
 import { chatWithLlm, testLlmConfig } from './llm/chat.js';
+import { postPublicDesignStudioPreviewChat } from './publishDashboardInsightChat.js';
+import { getPublicAgentWorkflow, publishAgentWorkflow } from './agentPublicWorkflows.js';
 import {
   applyPublicApiJwtBearer,
   enforcePublicApiJwtConnectionScope,
@@ -143,6 +145,7 @@ apiRouter.get('/health/ready', async (_req, res) => {
 });
 
 apiRouter.post('/agent-studio/workflow/run', postAgentStudioWorkflowRun);
+apiRouter.post('/agent-studio/publish', publishAgentWorkflow);
 apiRouter.post('/agent-studio/mcp/test', postAgentStudioMcpTest);
 
 apiRouter.get('/profile', getUserProfile);
@@ -163,6 +166,8 @@ apiRouter.post('/builder-forms/publish', publishBuilderPublicForm);
 apiRouter.post('/builder-apps/publish', publishBuilderPublicApp);
 apiRouter.put('/builder-apps/:slug', updateBuilderPublicApp);
 apiRouter.get('/public/design-studio/:slug', getPublicDesignStudioPreview);
+apiRouter.post('/public/design-studio/:slug/chat', postPublicDesignStudioPreviewChat);
+apiRouter.get('/public/agents/:slug', getPublicAgentWorkflow);
 apiRouter.get('/public/builder-apps/:slug', getPublicBuilderApp);
 apiRouter.get('/public/builder-apps/:slug/table-foreign-keys', getPublicBuilderAppTableForeignKeys);
 apiRouter.get('/public/builder-apps/:slug/fk-lookup', getPublicBuilderAppFkLookup);

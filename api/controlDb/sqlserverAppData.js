@@ -382,7 +382,10 @@ export const publishDesignStudioPreview = async (req, res) => {
     const titleRaw = req.body?.title ?? dt;
     const title =
       typeof titleRaw === 'string' && titleRaw.trim() ? String(titleRaw).trim().slice(0, 500) : String(dt).trim().slice(0, 500);
-    const slug = `dsp-${crypto.randomBytes(12).toString('hex')}`;
+    const requestedSlug =
+      typeof req.body?.slug === 'string' && /^dsp-[a-f0-9]{24}$/.test(req.body.slug.trim())
+        ? req.body.slug.trim()
+        : '';
     const liveSnap = req.body?.liveSnapshot;
     let proposalToStore = proposal;
     if (liveSnap && typeof liveSnap === 'object' && !Array.isArray(liveSnap)) {
@@ -405,6 +408,41 @@ export const publishDesignStudioPreview = async (req, res) => {
 
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
+
+    if (requestedSlug) {
+      const owned = await pool
+        .request()
+        .input('slug', sql.NVarChar, requestedSlug)
+        .input('tenantId', sql.Int, Number(tenantId))
+        .input('ownerUserId', sql.Int, Number(userId))
+        .query(`
+          SELECT TOP 1 slug FROM dbo.design_studio_public_previews
+          WHERE slug = @slug AND tenant_id = @tenantId AND owner_user_id = @ownerUserId
+        `);
+      if (owned.recordset?.length) {
+        await pool
+          .request()
+          .input('slug', sql.NVarChar, requestedSlug)
+          .input('tenantId', sql.Int, Number(tenantId))
+          .input('ownerUserId', sql.Int, Number(userId))
+          .input('title', sql.NVarChar, title)
+          .input('proposalJson', sql.NVarChar(sql.MAX), proposalStr)
+          .input('updatedAt', sql.BigInt, now)
+          .query(`
+            UPDATE dbo.design_studio_public_previews
+            SET title = @title, proposal_json = @proposalJson, updated_at = @updatedAt
+            WHERE slug = @slug AND tenant_id = @tenantId AND owner_user_id = @ownerUserId
+          `);
+        return res.json({
+          ok: true,
+          slug: requestedSlug,
+          title,
+          updatedAt: now,
+        });
+      }
+    }
+
+    const slug = requestedSlug || `dsp-${crypto.randomBytes(12).toString('hex')}`;
     await pool
       .request()
       .input('slug', sql.NVarChar, slug)
