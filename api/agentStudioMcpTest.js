@@ -16,11 +16,87 @@ const INIT_RPC = Object.freeze({
 
 const FETCH_TIMEOUT_MS = 18_000;
 
+/** @param {string} urlString @param {string} body */
+function mcpUnexpectedResponseError(status, body, urlString) {
+  const trimmed = String(body ?? '').trim();
+  const lower = trimmed.toLowerCase();
+  let host = '';
+  try {
+    host = new URL(urlString).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+
+  const isHtml = lower.startsWith('<!doctype') || lower.startsWith('<html');
+
+  if (isHtml) {
+    if (host.includes('accounts.google.com') || (host.includes('google.com') && lower.includes('signin'))) {
+      return (
+        'That URL is a Google sign-in page, not an MCP server. Gmail does not expose accounts.google.com as a Streamable HTTP MCP endpoint. ' +
+        'Use a hosted MCP bridge (e.g. Zapier MCP, Pipedream) or your own HTTPS MCP server URL, and put your OAuth access token in Credential.'
+      );
+    }
+    if (host.includes('login.microsoftonline.com') || host.includes('login.live.com')) {
+      return (
+        'That URL is a Microsoft login page, not an MCP server. Use a remote Streamable HTTP MCP bridge URL plus a Graph OAuth token in Credential.'
+      );
+    }
+    if (host.includes('console.cloud.google.com')) {
+      return (
+        'That URL is the Google Cloud Console, not an MCP server. Create OAuth credentials there, then point URL at your MCP bridge HTTPS endpoint.'
+      );
+    }
+    return (
+      'The server returned an HTML web page instead of MCP JSON-RPC. Paste your Streamable HTTP MCP endpoint (HTTPS), not a sign-in or marketing page.'
+    );
+  }
+
+  const preview = trimmed.slice(0, 120);
+  return `Unexpected response (${status}). Check that this is your MCP Streamable HTTP endpoint.${preview ? ` Preview: ${preview}${trimmed.length > 120 ? '…' : ''}` : ''}`;
+}
+
 function bearerHeader(raw) {
   const t = String(raw ?? '').trim();
   if (!t) return null;
   if (/^Bearer\s+/i.test(t)) return t;
   return `Bearer ${t}`;
+}
+
+/** Trailing slash on path often yields 404 on Google MCP (e.g. /mcp/v1/). */
+function normalizeMcpUrl(urlString) {
+  const raw = String(urlString ?? '').trim();
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) {
+      u.pathname = u.pathname.replace(/\/+$/, '');
+    }
+    return u.toString();
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
+}
+
+/** @param {number} status @param {string} body @param {string} urlString */
+function mcpHandshakeError(status, body, urlString) {
+  const trimmed = String(body ?? '').trim();
+  let host = '';
+  try {
+    host = new URL(urlString).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  if (status === 404) {
+    if (host === 'gmailmcp.googleapis.com') {
+      const hadSlash = /\/mcp\/v1\/$/i.test(urlString) || /\/$/.test(urlString.replace(/\?.*$/, ''));
+      return hadSlash
+        ? 'HTTP 404 — remove the trailing slash. Use exactly https://gmailmcp.googleapis.com/mcp/v1 (no slash at the end).'
+        : 'HTTP 404 — Gmail MCP path not found. Use https://gmailmcp.googleapis.com/mcp/v1 and enable Gmail MCP API in your Google Cloud project.';
+    }
+    return `Could not complete handshake (HTTP 404). Check the MCP path — many servers use /mcp or /mcp/v1 with no trailing slash.${trimmed && !trimmed.startsWith('<') ? ` ${trimmed.slice(0, 120)}` : ''}`;
+  }
+  const hint = trimmed && !trimmed.startsWith('<') ? ` ${trimmed.slice(0, 160)}${trimmed.length > 160 ? '…' : ''}` : '';
+  return `Could not complete handshake (HTTP ${status}).${hint}`;
 }
 
 export async function postAgentStudioMcpTest(req, res) {
@@ -39,10 +115,11 @@ export async function postAgentStudioMcpTest(req, res) {
     if (!urlString) {
       return res.status(422).json({ ok: false, error: 'Enter a server URL.' });
     }
+    const fetchUrl = normalizeMcpUrl(urlString);
     /** @type {URL} */
     let urlObj;
     try {
-      urlObj = new URL(urlString);
+      urlObj = new URL(fetchUrl);
     } catch {
       return res.status(422).json({ ok: false, error: 'URL must be valid (e.g. https://host/path).' });
     }
@@ -63,7 +140,7 @@ export async function postAgentStudioMcpTest(req, res) {
     /** @type {Response} */
     let response;
     try {
-      response = await fetch(urlString, {
+      response = await fetch(fetchUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(INIT_RPC),
@@ -117,10 +194,9 @@ export async function postAgentStudioMcpTest(req, res) {
     }
 
     if (!response.ok && !rpcOk) {
-      const hint = trimmed && !trimmed.startsWith('<') ? ` ${trimmed.slice(0, 160)}${trimmed.length > 160 ? '…' : ''}` : '';
       return res.status(422).json({
         ok: false,
-        error: `Could not complete handshake (HTTP ${response.status}).${hint}`,
+        error: mcpHandshakeError(response.status, trimmed, fetchUrl),
       });
     }
 
@@ -156,10 +232,9 @@ export async function postAgentStudioMcpTest(req, res) {
       });
     }
 
-    const preview = trimmed.slice(0, 120);
     return res.status(422).json({
       ok: false,
-      error: `Unexpected response (${response.status}). Check that this is your MCP Streamable HTTP endpoint.${preview ? ` Preview: ${preview}${trimmed.length > 120 ? '…' : ''}` : ''}`,
+      error: mcpUnexpectedResponseError(response.status, trimmed, urlString),
     });
   } catch (err) {
     if (String(err?.name || '') === 'AbortError') {

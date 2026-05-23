@@ -25,6 +25,41 @@ const buildSqlServerConfig = (row) => {
   return config;
 };
 
+/** @type {Map<string, { pool: import('mssql').ConnectionPool; connecting: Promise<import('mssql').ConnectionPool> | null }>} */
+const profilePoolCache = new Map();
+
+const profilePoolKey = (row) => {
+  const c = buildSqlServerConfig(row);
+  return `${c.server}|${c.port ?? ''}|${c.database}|${c.user}`;
+};
+
+/** Reuse datasource pools across blueprint/table-data calls (avoids cold connect per request). */
+const acquireSqlServerProfilePool = async (row) => {
+  const key = profilePoolKey(row);
+  const hit = profilePoolCache.get(key);
+  if (hit?.pool?.connected) return hit.pool;
+  if (hit?.connecting) return hit.connecting;
+
+  const config = buildSqlServerConfig(row);
+  const pool = new sql.ConnectionPool(config);
+  pool.on('error', (err) => {
+    console.error('[sqlserver-datasource] pool error', err);
+    profilePoolCache.delete(key);
+  });
+
+  const connecting = pool.connect().then(() => {
+    profilePoolCache.set(key, { pool, connecting: null });
+    return pool;
+  });
+  profilePoolCache.set(key, { pool, connecting });
+  try {
+    return await connecting;
+  } catch (error) {
+    profilePoolCache.delete(key);
+    throw error;
+  }
+};
+
 /** Allow dbo.Table or Table (defaults to dbo). */
 export const parseSafeSqlServerTableRef = (table) => {
   const t = String(table || '').trim();
@@ -105,8 +140,7 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
   }
 
   const { schema, table } = ref;
-  const config = buildSqlServerConfig(row);
-  const pool = new sql.ConnectionPool(config);
+  const pool = await acquireSqlServerProfilePool(row);
 
   const search = String(options?.q || '').trim();
   const filters =
@@ -116,8 +150,6 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
   const conditions = Array.isArray(options?.conditions) ? options.conditions : [];
 
   try {
-    await pool.connect();
-
     const colResult = await pool.request().query(`
       SELECT
         c.COLUMN_NAME AS column_name,
@@ -196,15 +228,8 @@ export const getSqlServerTableDataForProfile = async (row, tableParam, limit, of
       })
     );
 
-    await pool.close();
-
     return { columns, rows, total };
   } catch (e) {
-    try {
-      await pool.close();
-    } catch {
-      /* ignore */
-    }
     throw e;
   }
 };
