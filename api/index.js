@@ -19,6 +19,8 @@ import {
   deleteDashboardRecord,
   deleteAgentStudioRecord,
   deleteExternalApiRecord,
+  deleteAutomationProjectRecord,
+  deleteMcpServerRecord,
   getPublicDesignStudioPreview,
   getWorkspaceGuardrailsCatalog,
   saveWorkspaceGuardrailsCatalog,
@@ -29,12 +31,16 @@ import {
   listSavedDashboards,
   listSavedAgents,
   listSavedExternalApis,
+  listSavedAutomationProjects,
+  listSavedMcpServers,
   saveAppRecord,
   saveBlueprintApiRecord,
   saveDashboardRecord,
   saveAgentStudioRecord,
   publishDesignStudioPreview,
   saveExternalApiRecord,
+  saveAutomationProjectRecord,
+  saveMcpServerRecord,
 } from './controlDb/sqlserverAppData.js';
 import {
   getPublicBuilderForm,
@@ -201,6 +207,13 @@ apiRouter.delete('/workspace/blueprint-apis/:id', deleteBlueprintApiRecord);
 apiRouter.get('/workspace/external-apis', listSavedExternalApis);
 apiRouter.post('/workspace/external-apis', saveExternalApiRecord);
 apiRouter.delete('/workspace/external-apis/:id', deleteExternalApiRecord);
+
+apiRouter.get('/workspace/automation-projects', listSavedAutomationProjects);
+apiRouter.post('/workspace/automation-projects', saveAutomationProjectRecord);
+apiRouter.delete('/workspace/automation-projects/:id', deleteAutomationProjectRecord);
+apiRouter.get('/workspace/mcp-servers', listSavedMcpServers);
+apiRouter.post('/workspace/mcp-servers', saveMcpServerRecord);
+apiRouter.delete('/workspace/mcp-servers/:id', deleteMcpServerRecord);
 
 apiRouter.get('/connections/list', listConnectionProfiles);
 apiRouter.get('/connections/list-all', listAllWorkspaceConnectionProfiles);

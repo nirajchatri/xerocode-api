@@ -131,6 +131,37 @@ const ensureSavedWorkspaceTables = async (pool) => {
     END
   `);
   await pool.request().query(`
+    IF OBJECT_ID(N'dbo.saved_automation_projects', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.saved_automation_projects (
+        id NVARCHAR(255) PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        visibility NVARCHAR(20) NOT NULL DEFAULT 'private',
+        name NVARCHAR(512) NOT NULL,
+        payload NVARCHAR(MAX) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME())
+      );
+      CREATE INDEX idx_saved_automation_projects_tenant_owner ON dbo.saved_automation_projects (tenant_id, owner_user_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
+    IF OBJECT_ID(N'dbo.saved_mcp_servers', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.saved_mcp_servers (
+        id NVARCHAR(255) PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        name NVARCHAR(512) NOT NULL,
+        payload NVARCHAR(MAX) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME())
+      );
+      CREATE INDEX idx_saved_mcp_servers_tenant_owner ON dbo.saved_mcp_servers (tenant_id, owner_user_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
     IF OBJECT_ID(N'dbo.workspace_guardrails_catalog', N'U') IS NULL
     BEGIN
       CREATE TABLE dbo.workspace_guardrails_catalog (
@@ -1056,6 +1087,245 @@ export const deleteExternalApiRecord = async (req, res) => {
     return res.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to delete external API.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+/** Automation Studio projects — workflow JSON in payload (tenant + user scoped). */
+export const listSavedAutomationProjects = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to load automation projects.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const result = await pool
+      .request()
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('userId', sql.Int, Number(userId))
+      .query(`
+        SELECT payload
+        FROM dbo.saved_automation_projects
+        WHERE tenant_id = @tenantId AND owner_user_id = @userId
+        ORDER BY updated_at DESC
+      `);
+    const projects = (result.recordset || []).map((row) => parsePayload(row.payload));
+    return res.json({ ok: true, projects });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to list automation projects.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const saveAutomationProjectRecord = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to save automation projects.' });
+    }
+    const body = req.body || {};
+    const project = body.project ?? body;
+    const id = String(project?.id || '').trim();
+    const name = String(project?.name || '').trim();
+    if (!id || !name) {
+      return res.status(400).json({ ok: false, message: 'Automation project id and name are required.' });
+    }
+    const updatedAt = Number(project.updatedAt) || Date.now();
+    const visibility = project.visibility === 'tenant_shared' ? 'tenant_shared' : 'private';
+    const payloadStr = JSON.stringify(project);
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const apCreatedType = await getColumnDataType(pool, 'saved_automation_projects', 'created_at');
+    const apUpdatedType = await getColumnDataType(pool, 'saved_automation_projects', 'updated_at');
+    const apCreatedBigInt = apCreatedType === 'bigint';
+    const apUpdatedBigInt = apUpdatedType === 'bigint';
+    const apReq = pool
+      .request()
+      .input('id', sql.NVarChar, id)
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('ownerUserId', sql.Int, Number(userId))
+      .input('visibility', sql.NVarChar, visibility)
+      .input('name', sql.NVarChar, name)
+      .input('payload', sql.NVarChar(sql.MAX), payloadStr)
+      .input('updatedAt', sql.BigInt, updatedAt);
+    const apCreatedExpr = apCreatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+    const apUpdatedExpr = apUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+    const apExists = await pool
+      .request()
+      .input('id', sql.NVarChar, id)
+      .query(`SELECT TOP 1 id FROM dbo.saved_automation_projects WHERE id = @id`);
+    if (apExists.recordset?.length) {
+      await apReq.query(`
+        UPDATE dbo.saved_automation_projects
+        SET name = @name, visibility = @visibility, payload = @payload, updated_at = ${apUpdatedExpr}
+        WHERE id = @id AND tenant_id = @tenantId AND owner_user_id = @ownerUserId
+      `);
+    } else {
+      await apReq.query(`
+        INSERT INTO dbo.saved_automation_projects (id, tenant_id, owner_user_id, visibility, name, payload, updated_at, created_at)
+        VALUES (@id, @tenantId, @ownerUserId, @visibility, @name, @payload, ${apUpdatedExpr}, ${apCreatedExpr})
+      `);
+    }
+    return res.json({ ok: true, id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to save automation project.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const deleteAutomationProjectRecord = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    const id = String(req.params?.id || '');
+    if (!id) return res.status(400).json({ ok: false, message: 'Missing automation project id.' });
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    await pool
+      .request()
+      .input('id', sql.NVarChar, id)
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('userId', sql.Int, Number(userId))
+      .query(
+        `DELETE FROM dbo.saved_automation_projects WHERE id = @id AND tenant_id = @tenantId AND owner_user_id = @userId`
+      );
+    return res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to delete automation project.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+/** MCP server profiles (URL, transport, tokens) — full record in payload. */
+export const listSavedMcpServers = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to load MCP servers.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const result = await pool
+      .request()
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('userId', sql.Int, Number(userId))
+      .query(`
+        SELECT payload
+        FROM dbo.saved_mcp_servers
+        WHERE tenant_id = @tenantId AND owner_user_id = @userId
+        ORDER BY updated_at DESC
+      `);
+    const servers = (result.recordset || []).map((row) => parsePayload(row.payload));
+    return res.json({ ok: true, servers });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to list MCP servers.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const saveMcpServerRecord = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to save MCP servers.' });
+    }
+    const body = req.body || {};
+    const server = body.server ?? body;
+    const id = String(server?.id || '').trim();
+    const name = String(server?.name || '').trim();
+    if (!id || !name) {
+      return res.status(400).json({ ok: false, message: 'MCP server id and name are required.' });
+    }
+    const updatedAt = Number(server.updatedAt) || Date.now();
+    const payloadStr = JSON.stringify(server);
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const mcpCreatedType = await getColumnDataType(pool, 'saved_mcp_servers', 'created_at');
+    const mcpUpdatedType = await getColumnDataType(pool, 'saved_mcp_servers', 'updated_at');
+    const mcpCreatedBigInt = mcpCreatedType === 'bigint';
+    const mcpUpdatedBigInt = mcpUpdatedType === 'bigint';
+    const mcpReq = pool
+      .request()
+      .input('id', sql.NVarChar, id)
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('ownerUserId', sql.Int, Number(userId))
+      .input('name', sql.NVarChar, name)
+      .input('payload', sql.NVarChar(sql.MAX), payloadStr)
+      .input('updatedAt', sql.BigInt, updatedAt);
+    const mcpCreatedExpr = mcpCreatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+    const mcpUpdatedExpr = mcpUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+    const mcpExists = await pool.request().input('id', sql.NVarChar, id).query(`SELECT TOP 1 id FROM dbo.saved_mcp_servers WHERE id = @id`);
+    if (mcpExists.recordset?.length) {
+      await mcpReq.query(`
+        UPDATE dbo.saved_mcp_servers
+        SET name = @name, payload = @payload, updated_at = ${mcpUpdatedExpr}
+        WHERE id = @id AND tenant_id = @tenantId AND owner_user_id = @ownerUserId
+      `);
+    } else {
+      await mcpReq.query(`
+        INSERT INTO dbo.saved_mcp_servers (id, tenant_id, owner_user_id, name, payload, updated_at, created_at)
+        VALUES (@id, @tenantId, @ownerUserId, @name, @payload, ${mcpUpdatedExpr}, ${mcpCreatedExpr})
+      `);
+    }
+    return res.json({ ok: true, id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to save MCP server.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const deleteMcpServerRecord = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    const id = String(req.params?.id || '');
+    if (!id) return res.status(400).json({ ok: false, message: 'Missing MCP server id.' });
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    await pool
+      .request()
+      .input('id', sql.NVarChar, id)
+      .input('tenantId', sql.Int, Number(tenantId))
+      .input('userId', sql.Int, Number(userId))
+      .query(`DELETE FROM dbo.saved_mcp_servers WHERE id = @id AND tenant_id = @tenantId AND owner_user_id = @userId`);
+    return res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to delete MCP server.';
     return res.status(500).json({ ok: false, message });
   } finally {
     await closeControlSqlServer(pool);
