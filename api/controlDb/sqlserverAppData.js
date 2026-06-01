@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
 import sql from 'mssql';
+import {
+  buildVisibilityResourceScope,
+  resolveProjectGrantContext,
+} from '../lib/projectGrantAccess.js';
 import { closeControlSqlServer, connectToControlSqlServer } from './sqlserver.js';
 import { getSqlServerTableDataForProfile } from '../connections/sqlServerSchema.js';
 import { getPostgresTableDataForProfile } from '../connections/postgresSchema.js';
@@ -15,7 +19,7 @@ const parsePayload = (raw) => {
   }
 };
 
-const ensureSavedWorkspaceTables = async (pool) => {
+export const ensureSavedWorkspaceTables = async (pool) => {
   await pool.request().query(`
     IF OBJECT_ID(N'dbo.saved_apps', N'U') IS NULL
     BEGIN
@@ -199,14 +203,16 @@ export const listSavedApps = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool
       .request()
       .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, userId != null ? Number(userId) : -1).query(`
+      .input('userId', sql.Int, userId != null ? Number(userId) : -1);
+    const scope = buildVisibilityResourceScope(grantCtx, 'application', rq);
+    const result = await rq.query(`
         SELECT id, tenant_id, owner_user_id, visibility, name, payload, updated_at
         FROM dbo.saved_apps
-        WHERE tenant_id = @tenantId
-          AND (owner_user_id = @userId OR visibility = 'tenant_shared')
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const apps = (result.recordset || []).map((row) => ({
@@ -613,14 +619,16 @@ export const listSavedDashboards = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool
       .request()
       .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, userId != null ? Number(userId) : -1).query(`
+      .input('userId', sql.Int, userId != null ? Number(userId) : -1);
+    const scope = buildVisibilityResourceScope(grantCtx, 'dashboard', rq);
+    const result = await rq.query(`
         SELECT id, tenant_id, owner_user_id, visibility, name, payload, updated_at
         FROM dbo.saved_dashboards
-        WHERE tenant_id = @tenantId
-          AND (owner_user_id = @userId OR visibility = 'tenant_shared')
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const dashboards = (result.recordset || []).map((row) => ({
@@ -736,14 +744,16 @@ export const listSavedAgents = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool
       .request()
       .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, userId != null ? Number(userId) : -1).query(`
+      .input('userId', sql.Int, userId != null ? Number(userId) : -1);
+    const scope = buildVisibilityResourceScope(grantCtx, 'agent', rq);
+    const result = await rq.query(`
         SELECT id, tenant_id, owner_user_id, visibility, name, payload, updated_at
         FROM dbo.saved_studio_agents
-        WHERE tenant_id = @tenantId
-          AND (owner_user_id = @userId OR visibility = 'tenant_shared')
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const agents = (result.recordset || []).map((row) => ({
@@ -861,14 +871,13 @@ export const listSavedBlueprintApis = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
-      .request()
-      .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, Number(userId))
-      .query(`
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool.request().input('tenantId', sql.Int, Number(tenantId)).input('userId', sql.Int, Number(userId));
+    const scope = buildVisibilityResourceScope(grantCtx, 'api', rq, { idKind: 'blueprint' });
+    const result = await rq.query(`
         SELECT payload
         FROM dbo.saved_blueprint_apis
-        WHERE tenant_id = @tenantId AND owner_user_id = @userId
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const apis = (result.recordset || []).map((row) => parsePayload(row.payload));
@@ -985,14 +994,13 @@ export const listSavedExternalApis = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
-      .request()
-      .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, Number(userId))
-      .query(`
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool.request().input('tenantId', sql.Int, Number(tenantId)).input('userId', sql.Int, Number(userId));
+    const scope = buildVisibilityResourceScope(grantCtx, 'api', rq, { idKind: 'external' });
+    const result = await rq.query(`
         SELECT payload
         FROM dbo.saved_external_apis
-        WHERE tenant_id = @tenantId AND owner_user_id = @userId
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const externalApis = (result.recordset || []).map((row) => parsePayload(row.payload));
@@ -1105,14 +1113,13 @@ export const listSavedAutomationProjects = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
-      .request()
-      .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, Number(userId))
-      .query(`
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, userId);
+    const rq = pool.request().input('tenantId', sql.Int, Number(tenantId)).input('userId', sql.Int, Number(userId));
+    const scope = buildVisibilityResourceScope(grantCtx, 'automation', rq);
+    const result = await rq.query(`
         SELECT payload
         FROM dbo.saved_automation_projects
-        WHERE tenant_id = @tenantId AND owner_user_id = @userId
+        WHERE ${scope}
         ORDER BY updated_at DESC
       `);
     const projects = (result.recordset || []).map((row) => parsePayload(row.payload));

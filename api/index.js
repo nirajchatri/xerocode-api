@@ -8,6 +8,7 @@ import {
   loginUser,
   loginWithGithub,
   loginWithGoogle,
+  changePassword,
   requestPasswordResetOtp,
   resetPasswordWithOtp,
   saveUserProfile,
@@ -51,6 +52,12 @@ import {
   submitPublicBuilderForm,
 } from './builderPublicForms.js';
 import {
+  getPublicWebsitePage,
+  listWebsiteCmsAdmin,
+  saveWebsiteSection,
+  saveWebsiteSettings,
+} from './websiteCms.js';
+import {
   getPublicBuilderApp,
   getPublicBuilderAppFkLookup,
   getPublicBuilderAppTableData,
@@ -83,6 +90,8 @@ import {
   mutateConnectionTableData,
   saveMasterDetailBundle,
 } from './connections/schemaRoutes.js';
+import { createConnectionTableFromSpreadsheet } from './connections/createTableFromSpreadsheet.js';
+import { deleteConnectionTable } from './connections/deleteConnectionTable.js';
 import { chatWithLlm, testLlmConfig } from './llm/chat.js';
 import { postPublicDesignStudioPreviewChat } from './publishDashboardInsightChat.js';
 import { getPublicAgentWorkflow, publishAgentWorkflow } from './agentPublicWorkflows.js';
@@ -101,6 +110,18 @@ import {
 import { postAgentStudioWorkflowRun } from './agentStudioWorkflow.js';
 import { postAgentStudioMcpTest } from './agentStudioMcpTest.js';
 import { closeControlSqlServer, connectToControlSqlServer } from './controlDb/sqlserver.js';
+import {
+  createTenantUser,
+  deleteTenantUser,
+  getTenantMe,
+  getTenantMyAccess,
+  getTenantUser,
+  getTenantUserGrants,
+  listTenantProjects,
+  listTenantUsers,
+  saveTenantUserGrants,
+  updateTenantUser,
+} from './tenantUserManagement.js';
 
 export const apiRouter = Router();
 
@@ -162,6 +183,7 @@ apiRouter.post('/auth/google', loginWithGoogle);
 apiRouter.post('/auth/github', loginWithGithub);
 apiRouter.post('/auth/forgot-password/request-otp', requestPasswordResetOtp);
 apiRouter.post('/auth/forgot-password/reset', resetPasswordWithOtp);
+apiRouter.post('/auth/change-password', changePassword);
 apiRouter.post('/llm/chat', chatWithLlm);
 apiRouter.get('/llm-config', getLlmConfigs);
 apiRouter.put('/llm-config', saveLlmConfig);
@@ -174,6 +196,9 @@ apiRouter.put('/builder-apps/:slug', updateBuilderPublicApp);
 apiRouter.get('/public/design-studio/:slug', getPublicDesignStudioPreview);
 apiRouter.post('/public/design-studio/:slug/chat', postPublicDesignStudioPreviewChat);
 apiRouter.get('/public/agents/:slug', getPublicAgentWorkflow);
+/** Marketing site CMS (SQL Server) — public read */
+apiRouter.get('/website/page', getPublicWebsitePage);
+apiRouter.get('/website/page/:slug', getPublicWebsitePage);
 apiRouter.get('/public/builder-apps/:slug', getPublicBuilderApp);
 apiRouter.get('/public/builder-apps/:slug/table-foreign-keys', getPublicBuilderAppTableForeignKeys);
 apiRouter.get('/public/builder-apps/:slug/fk-lookup', getPublicBuilderAppFkLookup);
@@ -215,6 +240,22 @@ apiRouter.get('/workspace/mcp-servers', listSavedMcpServers);
 apiRouter.post('/workspace/mcp-servers', saveMcpServerRecord);
 apiRouter.delete('/workspace/mcp-servers/:id', deleteMcpServerRecord);
 
+/** Tenant user management — admins assign project view/edit access. */
+apiRouter.get('/tenant/me', getTenantMe);
+apiRouter.get('/tenant/my-access', getTenantMyAccess);
+apiRouter.get('/tenant/users', listTenantUsers);
+apiRouter.post('/tenant/users', createTenantUser);
+apiRouter.get('/tenant/projects', listTenantProjects);
+apiRouter.get('/tenant/users/:userId/grants', getTenantUserGrants);
+apiRouter.put('/tenant/users/:userId/grants', saveTenantUserGrants);
+apiRouter.get('/tenant/users/:userId', getTenantUser);
+apiRouter.put('/tenant/users/:userId', updateTenantUser);
+apiRouter.delete('/tenant/users/:userId', deleteTenantUser);
+
+apiRouter.get('/website/cms', listWebsiteCmsAdmin);
+apiRouter.post('/website/cms/sections', saveWebsiteSection);
+apiRouter.put('/website/cms/settings', saveWebsiteSettings);
+
 apiRouter.get('/connections/list', listConnectionProfiles);
 apiRouter.get('/connections/list-all', listAllWorkspaceConnectionProfiles);
 apiRouter.get('/connections/mysql/list', (req, res) => {
@@ -243,6 +284,12 @@ apiRouter.get('/connections/:id/table-foreign-keys', enforcePublicApiJwtConnecti
 apiRouter.get('/connections/:id/fk-lookup', enforcePublicApiJwtConnectionScope, getConnectionFkLookup);
 apiRouter.post('/connections/:id/table-data/mutate', enforcePublicApiJwtConnectionScope, mutateConnectionTableData);
 apiRouter.post('/connections/:id/table-data/master-detail-save', enforcePublicApiJwtConnectionScope, saveMasterDetailBundle);
+apiRouter.post(
+  '/connections/:id/tables/from-spreadsheet',
+  enforcePublicApiJwtConnectionScope,
+  createConnectionTableFromSpreadsheet
+);
+apiRouter.delete('/connections/:id/tables', enforcePublicApiJwtConnectionScope, deleteConnectionTable);
 
 /** Signed Bearer JWT for external API docs / Postman (scoped to tenant + saved connection profile). */
 apiRouter.post('/public-api-token/issue', issuePublicApiBearerToken);

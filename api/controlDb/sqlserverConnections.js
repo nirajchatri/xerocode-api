@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { CONNECTOR_DEFAULT_PORTS, normalizeConnectorType } from '../connections/connectorTypes.js';
 import { hostFallbacks, normalizeHost, sqlServerHostForStorage } from '../connections/hostUtils.js';
 import { logActivity } from '../lib/activityLog.js';
+import { buildConnectionResourceScope, resolveProjectGrantContext } from '../lib/projectGrantAccess.js';
 import { closeControlSqlServer, connectToControlSqlServer } from './sqlserver.js';
 import { getOrCreateUserAndTenantByEmail } from './sqlserverAuth.js';
 import { getPublicApiJwtSecret, signPublicApiJwt, verifyPublicApiJwt } from '../lib/publicApiJwt.js';
@@ -367,17 +368,6 @@ const resolveTenantAndOwnerForConnectionList = async (req) => {
 };
 
 /** Workspace visibility: tenant bucket OR rows owned by this user (fixes tenant_id drift / NULL tenant). */
-const sqlWorkspaceConnectionScopeWhere = (rq, tenantId, ownerUserId) => {
-  rq.input('tenantId', sql.Int, tenantId);
-  let fragment = `(tenant_id = @tenantId`;
-  const oid = ownerUserId != null ? Number(ownerUserId) : NaN;
-  if (Number.isFinite(oid)) {
-    rq.input('ownerUserId', sql.Int, oid);
-    fragment += ` OR owner_user_id = @ownerUserId`;
-  }
-  fragment += `)`;
-  return fragment;
-};
 
 export const listConnectionProfiles = async (req, res) => {
   let pool;
@@ -390,6 +380,7 @@ export const listConnectionProfiles = async (req, res) => {
     const typeVariants = connectorTypeVariantsForFilter(connectorFilter);
     pool = await connectToControlSqlServer();
     await ensureCoreTables(pool);
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, ownerUserId);
 
     let sqlText = `
         SELECT id, friendly_name, host, port, database_name, username, connector_type, created_at, updated_at
@@ -400,7 +391,7 @@ export const listConnectionProfiles = async (req, res) => {
     typeVariants.forEach((v, i) => {
       rq.input(`ct${i}`, sql.NVarChar, v);
     });
-    sqlText += `) AND ${sqlWorkspaceConnectionScopeWhere(rq, tenantId, ownerUserId)} ORDER BY id DESC`;
+    sqlText += `) AND ${buildConnectionResourceScope(grantCtx, rq, tenantId)} ORDER BY id DESC`;
 
     const rs = await rq.query(sqlText);
     const connections = (rs.recordset || []).map((row) => {
@@ -436,9 +427,10 @@ export const listAllWorkspaceConnectionProfiles = async (req, res) => {
 
     pool = await connectToControlSqlServer();
     await ensureCoreTables(pool);
+    const grantCtx = await resolveProjectGrantContext(pool, tenantId, ownerUserId);
 
     const rq = pool.request();
-    const scopeWhere = sqlWorkspaceConnectionScopeWhere(rq, tenantId, ownerUserId);
+    const scopeWhere = buildConnectionResourceScope(grantCtx, rq, tenantId);
     const sqlText = `
       SELECT id, friendly_name, host, port, database_name, username, connector_type, created_at, updated_at
       FROM dbo.connection_profiles

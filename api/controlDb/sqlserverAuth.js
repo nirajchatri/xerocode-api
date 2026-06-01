@@ -1,6 +1,11 @@
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 import sql from 'mssql';
+import {
+  getSmtpConfig,
+  sendOtpEmail,
+  sendPasswordChangedEmail,
+  sendSignupWelcomeEmail,
+} from '../lib/smtpMail.js';
 import { closeControlSqlServer, connectToControlSqlServer } from './sqlserver.js';
 
 const hashPassword = (password) => {
@@ -27,52 +32,20 @@ const normalizeAuthResponseUser = (row, authProvider = 'local') => ({
 
 const generateNumericOtp = () => String(Math.floor(100000 + Math.random() * 900000));
 
-const getOtpEmailConfig = (env = process.env) => {
-  const host = String(env.SMTP_HOST || 'smtp.gmail.com').trim();
-  const port = Number(env.SMTP_PORT || 465) || 465;
-  const secure = String(env.SMTP_SECURE || '').trim() === 'true' || port === 465;
-  const user = String(env.SMTP_USER || 'xerocode.ai@gmail.com').trim();
-  const pass = String(env.SMTP_PASS || env.GMAIL_APP_PASSWORD || '').trim();
-  const from = String(env.SMTP_FROM || user).trim();
-  return { host, port, secure, user, pass, from, isConfigured: Boolean(pass) };
+const notifyPasswordChanged = async (pool, registeredEmail) => {
+  const smtp = getSmtpConfig();
+  if (!smtp.isConfigured || !registeredEmail) return '';
+  const profile = await pool.request().input('email', sql.NVarChar, registeredEmail).query(`
+    SELECT TOP 1 email, full_name FROM dbo.user_profile WHERE email = @email
+  `);
+  const row = profile.recordset?.[0];
+  if (!row) return '';
+  const toEmail = String(row.email || registeredEmail).trim().toLowerCase();
+  await sendPasswordChangedEmail({ toEmail, fullName: row.full_name ?? '', smtp });
+  return ' A confirmation was sent to your registered email.';
 };
 
-const formatSmtpSendError = (error) => {
-  const raw = error instanceof Error ? error.message : String(error);
-  if (/application-specific password required/i.test(raw) || /534-5\.7\.9/i.test(raw)) {
-    return 'Gmail rejected the SMTP login. Set SMTP_PASS to a Google app password for SMTP_USER, not your normal Gmail password.';
-  }
-  if (/invalid login|authentication failed|username and password not accepted/i.test(raw)) {
-    return 'SMTP login failed. Verify SMTP_USER and SMTP_PASS. For Gmail, use an app password.';
-  }
-  return raw || 'Unable to send password reset email.';
-};
-
-const sendOtpEmail = async ({ toEmail, otpCode, smtp = getOtpEmailConfig() }) => {
-  if (!smtp.isConfigured) {
-    throw new Error('SMTP password is missing. Set SMTP_PASS (or GMAIL_APP_PASSWORD).');
-  }
-
-  const transporter = nodemailer.createTransport({
-    host: smtp.host,
-    port: smtp.port,
-    secure: smtp.secure,
-    auth: { user: smtp.user, pass: smtp.pass },
-  });
-  try {
-    await transporter.sendMail({
-      from: smtp.from,
-      to: toEmail,
-      subject: 'Your OTP for password reset',
-      text: `Your OTP is ${otpCode}. It is valid for 10 minutes.`,
-      html: `<p>Your OTP is <strong>${otpCode}</strong>.</p><p>It is valid for 10 minutes.</p>`,
-    });
-  } catch (error) {
-    throw new Error(formatSmtpSendError(error));
-  }
-};
-
-const ensureSqlServerAuthTables = async (pool) => {
+export const ensureSqlServerAuthTables = async (pool) => {
   await pool.request().query(`
     IF OBJECT_ID(N'dbo.tenants', N'U') IS NULL
     BEGIN
@@ -259,15 +232,21 @@ export const getOrCreateUserAndTenantByEmail = async (emailRaw, fullNameRaw) => 
 
     let userId = null;
     const userHit = await pool.request().input('email', sql.NVarChar, email).query(`
-      SELECT TOP 1 id FROM dbo.user_profile WHERE email = @email
+      SELECT TOP 1 id, tenant_id FROM dbo.user_profile WHERE email = @email
     `);
     if (userHit.recordset?.length) {
       userId = Number(userHit.recordset[0].id) || null;
-      await pool
-        .request()
-        .input('tenantId', sql.Int, tenantId)
-        .input('userId', sql.Int, userId)
-        .query(`UPDATE dbo.user_profile SET tenant_id = ISNULL(tenant_id, @tenantId), updated_at = SYSDATETIME() WHERE id = @userId`);
+      const profileTenantId = Number(userHit.recordset[0].tenant_id) || null;
+      if (profileTenantId) {
+        // Invited users belong to admin's workspace — never override with email-domain tenant.
+        tenantId = profileTenantId;
+      } else {
+        await pool
+          .request()
+          .input('tenantId', sql.Int, tenantId)
+          .input('userId', sql.Int, userId)
+          .query(`UPDATE dbo.user_profile SET tenant_id = @tenantId, updated_at = SYSDATETIME() WHERE id = @userId`);
+      }
     } else {
       userId = await nextUserId(pool);
       await pool
@@ -319,7 +298,24 @@ export const signupUser = async (req, res) => {
         VALUES (@id, @fullName, @email, @passwordHash, SYSDATETIME(), SYSDATETIME())
       `);
     await getOrCreateUserAndTenantByEmail(email, fullName);
-    return res.json({ ok: true, message: 'Signup successful.', user: { id, fullName, email, authProvider: 'local', avatarUrl: '' } });
+
+    const smtp = getSmtpConfig();
+    let emailNote = '';
+    if (smtp.isConfigured) {
+      try {
+        await sendSignupWelcomeEmail({ toEmail: email, fullName, email, password, smtp });
+        emailNote = ' Login details were sent to your registered email.';
+      } catch (mailErr) {
+        console.error('Signup welcome email failed:', mailErr);
+        emailNote = ' Account created; welcome email could not be sent.';
+      }
+    }
+
+    return res.json({
+      ok: true,
+      message: `Signup successful.${emailNote}`,
+      user: { id, fullName, email, authProvider: 'local', avatarUrl: '' },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to signup.';
     return res.status(500).json({ ok: false, message });
@@ -486,17 +482,19 @@ export const requestPasswordResetOtp = async (req, res) => {
   if (!email) return res.status(400).json({ ok: false, message: 'Email is required.' });
 
   const isProduction = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
-  const smtp = getOtpEmailConfig();
+  const smtp = getSmtpConfig();
   let pool;
   try {
     pool = await connectToControlSqlServer();
     await ensureSqlServerAuthTables(pool);
     const users = await pool.request().input('email', sql.NVarChar, email).query(`
-      SELECT TOP 1 id FROM dbo.user_profile WHERE email = @email
+      SELECT TOP 1 id, email FROM dbo.user_profile WHERE email = @email
     `);
-    if (!users.recordset?.length) {
+    const userRow = users.recordset?.[0];
+    if (!userRow) {
       return res.status(404).json({ ok: false, message: 'No account found for this email.' });
     }
+    const registeredEmail = String(userRow.email || email).trim().toLowerCase();
 
     if (isProduction && !smtp.isConfigured) {
       return res.status(503).json({
@@ -506,7 +504,7 @@ export const requestPasswordResetOtp = async (req, res) => {
     }
 
     const otpCode = generateNumericOtp();
-    await insertPasswordResetOtp(pool, email, otpCode);
+    await insertPasswordResetOtp(pool, registeredEmail, otpCode);
 
     if (!smtp.isConfigured) {
       return res.json({
@@ -516,7 +514,7 @@ export const requestPasswordResetOtp = async (req, res) => {
       });
     }
 
-    await sendOtpEmail({ toEmail: email, otpCode, smtp });
+    await sendOtpEmail({ toEmail: registeredEmail, otpCode, smtp });
     return res.json({ ok: true, message: 'OTP sent to your registered email. It is valid for 10 minutes.' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate OTP.';
@@ -566,9 +564,88 @@ export const resetPasswordWithOtp = async (req, res) => {
     await pool.request().input('id', sql.Int, Number(otpRows.recordset[0].id)).query(`
       UPDATE dbo.password_reset_otp SET used = 1 WHERE id = @id
     `);
-    return res.json({ ok: true, message: 'Password reset successful. Please login with new password.' });
+
+    let emailNote = '';
+    try {
+      emailNote = await notifyPasswordChanged(pool, email);
+    } catch (mailErr) {
+      console.error('Password changed email failed:', mailErr);
+    }
+
+    return res.json({
+      ok: true,
+      message: `Password reset successful. Please login with your new password.${emailNote}`,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to reset password.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const changePassword = async (req, res) => {
+  const sessionEmail = String(req.context?.email || '').trim().toLowerCase();
+  if (!sessionEmail) {
+    return res.status(401).json({ ok: false, message: 'Sign in required to change your password.' });
+  }
+
+  const currentPassword = String(req.body?.currentPassword ?? '');
+  const newPassword = String(req.body?.newPassword ?? '');
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ ok: false, message: 'Current password and new password are required.' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ ok: false, message: 'New password must be at least 6 characters.' });
+  }
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ ok: false, message: 'New password must be different from your current password.' });
+  }
+
+  let pool;
+  try {
+    pool = await connectToControlSqlServer();
+    await ensureSqlServerAuthTables(pool);
+    const result = await pool.request().input('email', sql.NVarChar, sessionEmail).query(`
+      SELECT TOP 1 id, email, full_name, password_hash
+      FROM dbo.user_profile
+      WHERE email = @email
+    `);
+    const row = result.recordset?.[0];
+    if (!row) {
+      return res.status(404).json({ ok: false, message: 'No account found for your session.' });
+    }
+    if (!row.password_hash) {
+      return res.status(400).json({
+        ok: false,
+        message: 'This account uses social sign-in. Use forgot password or your provider to manage access.',
+      });
+    }
+    if (!verifyPassword(currentPassword, row.password_hash)) {
+      return res.status(401).json({ ok: false, message: 'Current password is incorrect.' });
+    }
+
+    const registeredEmail = String(row.email || sessionEmail).trim().toLowerCase();
+    const passwordHash = hashPassword(newPassword);
+    await pool
+      .request()
+      .input('email', sql.NVarChar, registeredEmail)
+      .input('passwordHash', sql.NVarChar, passwordHash)
+      .query(`
+        UPDATE dbo.user_profile SET password_hash = @passwordHash, updated_at = SYSDATETIME() WHERE email = @email
+      `);
+
+    let emailNote = '';
+    try {
+      emailNote = await notifyPasswordChanged(pool, registeredEmail);
+    } catch (mailErr) {
+      console.error('Password changed email failed:', mailErr);
+      emailNote = ' Password updated; confirmation email could not be sent.';
+    }
+
+    return res.json({ ok: true, message: `Password updated successfully.${emailNote}` });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to change password.';
     return res.status(500).json({ ok: false, message });
   } finally {
     await closeControlSqlServer(pool);
