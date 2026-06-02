@@ -166,6 +166,20 @@ export const ensureSavedWorkspaceTables = async (pool) => {
     END
   `);
   await pool.request().query(`
+    IF OBJECT_ID(N'dbo.saved_helpdesk_tickets', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.saved_helpdesk_tickets (
+        id NVARCHAR(128) PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        payload NVARCHAR(MAX) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME())
+      );
+      CREATE INDEX idx_saved_helpdesk_tickets_tenant ON dbo.saved_helpdesk_tickets (tenant_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
     IF OBJECT_ID(N'dbo.workspace_guardrails_catalog', N'U') IS NULL
     BEGIN
       CREATE TABLE dbo.workspace_guardrails_catalog (
@@ -1414,6 +1428,146 @@ export const saveWorkspaceGuardrailsCatalog = async (req, res) => {
     return res.json({ ok: true, updatedAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to save Guardrails catalog.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+/** Upsert one helpdesk ticket row (full JSON payload includes agent chat + resolution). */
+const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
+  const id = String(ticket?.id || '').trim();
+  if (!id) return null;
+  const updatedAt = Number(ticket.updatedAt) || Date.now();
+  const payloadStr = JSON.stringify(ticket);
+  const hdUpdatedType = await getColumnDataType(pool, 'saved_helpdesk_tickets', 'updated_at');
+  const hdUpdatedBigInt = hdUpdatedType === 'bigint';
+  const exists = await pool
+    .request()
+    .input('id', sql.NVarChar, id)
+    .input('tenantId', sql.Int, Number(tenantId))
+    .query(`SELECT TOP 1 id FROM dbo.saved_helpdesk_tickets WHERE id = @id AND tenant_id = @tenantId`);
+  const hdReq = pool
+    .request()
+    .input('id', sql.NVarChar, id)
+    .input('tenantId', sql.Int, Number(tenantId))
+    .input('ownerUserId', sql.Int, Number(userId))
+    .input('payload', sql.NVarChar(sql.MAX), payloadStr)
+    .input('updatedAt', sql.BigInt, updatedAt);
+  const hdUpdatedExpr = hdUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+  const hdCreatedExpr = hdUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
+  if (exists.recordset?.length) {
+    await hdReq.query(`
+      UPDATE dbo.saved_helpdesk_tickets
+      SET payload = @payload, updated_at = ${hdUpdatedExpr}
+      WHERE id = @id AND tenant_id = @tenantId
+    `);
+  } else {
+    await hdReq.query(`
+      INSERT INTO dbo.saved_helpdesk_tickets (id, tenant_id, owner_user_id, payload, updated_at, created_at)
+      VALUES (@id, @tenantId, @ownerUserId, @payload, ${hdUpdatedExpr}, ${hdCreatedExpr})
+    `);
+  }
+  return { id, updatedAt };
+};
+
+/** Helpdesk ICM tickets — tenant-wide queue (all tickets visible to signed-in tenant users). */
+export const listHelpdeskTickets = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to load helpdesk tickets.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const result = await pool
+      .request()
+      .input('tenantId', sql.Int, Number(tenantId))
+      .query(`
+        SELECT payload
+        FROM dbo.saved_helpdesk_tickets
+        WHERE tenant_id = @tenantId
+        ORDER BY updated_at DESC
+      `);
+    const tickets = (result.recordset || [])
+      .map((row) => parsePayload(row.payload))
+      .filter((t) => t && typeof t.id === 'string');
+    return res.json({ ok: true, tickets });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to list helpdesk tickets.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const saveHelpdeskTicketRecord = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to save helpdesk tickets.' });
+    }
+    const body = req.body || {};
+    const ticket = body.ticket ?? body;
+    const id = String(ticket?.id || '').trim();
+    if (!id) {
+      return res.status(400).json({ ok: false, message: 'Ticket id is required.' });
+    }
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const saved = await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket);
+    if (!saved) {
+      return res.status(400).json({ ok: false, message: 'Ticket id is required.' });
+    }
+    return res.json({ ok: true, id: saved.id, updatedAt: saved.updatedAt });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to save helpdesk ticket.';
+    return res.status(500).json({ ok: false, message });
+  } finally {
+    await closeControlSqlServer(pool);
+  }
+};
+
+export const syncHelpdeskTickets = async (req, res) => {
+  let pool;
+  try {
+    const ctx = req.context || {};
+    const tenantId = ctx.tenantId ?? null;
+    const userId = ctx.userId ?? null;
+    if (tenantId == null || userId == null) {
+      return res.status(401).json({ ok: false, message: 'Sign in required to save helpdesk tickets.' });
+    }
+    const body = req.body || {};
+    const rawTickets = Array.isArray(body.tickets) ? body.tickets : [];
+    const tickets = rawTickets.filter((t) => t && typeof t.id === 'string' && String(t.id).trim());
+    pool = await connectToControlSqlServer();
+    await ensureSavedWorkspaceTables(pool);
+    const incomingIds = tickets.map((t) => String(t.id).trim());
+    const delReq = pool.request().input('tenantId', sql.Int, Number(tenantId));
+    if (incomingIds.length === 0) {
+      await delReq.query(`DELETE FROM dbo.saved_helpdesk_tickets WHERE tenant_id = @tenantId`);
+    } else {
+      incomingIds.forEach((id, idx) => {
+        delReq.input(`id${idx}`, sql.NVarChar, id);
+      });
+      const inList = incomingIds.map((_, idx) => `@id${idx}`).join(', ');
+      await delReq.query(`
+        DELETE FROM dbo.saved_helpdesk_tickets
+        WHERE tenant_id = @tenantId AND id NOT IN (${inList})
+      `);
+    }
+    for (const ticket of tickets) {
+      await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket);
+    }
+    return res.json({ ok: true, count: tickets.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to sync helpdesk tickets.';
     return res.status(500).json({ ok: false, message });
   } finally {
     await closeControlSqlServer(pool);

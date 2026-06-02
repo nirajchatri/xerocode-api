@@ -42,6 +42,9 @@ import {
   saveExternalApiRecord,
   saveAutomationProjectRecord,
   saveMcpServerRecord,
+  listHelpdeskTickets,
+  saveHelpdeskTicketRecord,
+  syncHelpdeskTickets,
 } from './controlDb/sqlserverAppData.js';
 import {
   getPublicBuilderForm,
@@ -239,6 +242,9 @@ apiRouter.delete('/workspace/automation-projects/:id', deleteAutomationProjectRe
 apiRouter.get('/workspace/mcp-servers', listSavedMcpServers);
 apiRouter.post('/workspace/mcp-servers', saveMcpServerRecord);
 apiRouter.delete('/workspace/mcp-servers/:id', deleteMcpServerRecord);
+apiRouter.get('/workspace/helpdesk-tickets', listHelpdeskTickets);
+apiRouter.post('/workspace/helpdesk-tickets', saveHelpdeskTicketRecord);
+apiRouter.put('/workspace/helpdesk-tickets', syncHelpdeskTickets);
 
 /** Tenant user management — admins assign project view/edit access. */
 apiRouter.get('/tenant/me', getTenantMe);
