@@ -1445,8 +1445,7 @@ const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
   const exists = await pool
     .request()
     .input('id', sql.NVarChar, id)
-    .input('tenantId', sql.Int, Number(tenantId))
-    .query(`SELECT TOP 1 id FROM dbo.saved_helpdesk_tickets WHERE id = @id AND tenant_id = @tenantId`);
+    .query(`SELECT TOP 1 id FROM dbo.saved_helpdesk_tickets WHERE id = @id`);
   const hdReq = pool
     .request()
     .input('id', sql.NVarChar, id)
@@ -1459,8 +1458,11 @@ const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
   if (exists.recordset?.length) {
     await hdReq.query(`
       UPDATE dbo.saved_helpdesk_tickets
-      SET payload = @payload, updated_at = ${hdUpdatedExpr}
-      WHERE id = @id AND tenant_id = @tenantId
+      SET tenant_id = @tenantId,
+          owner_user_id = @ownerUserId,
+          payload = @payload,
+          updated_at = ${hdUpdatedExpr}
+      WHERE id = @id
     `);
   } else {
     await hdReq.query(`
@@ -1471,6 +1473,19 @@ const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
   return { id, updatedAt };
 };
 
+const dedupeHelpdeskTicketsById = (tickets) => {
+  const byId = new Map();
+  for (const ticket of tickets) {
+    if (!ticket || typeof ticket.id !== 'string' || !String(ticket.id).trim()) continue;
+    const id = String(ticket.id).trim();
+    const existing = byId.get(id);
+    if (!existing || Number(ticket.updatedAt || 0) > Number(existing.updatedAt || 0)) {
+      byId.set(id, ticket);
+    }
+  }
+  return [...byId.values()].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+};
+
 /** Helpdesk ICM tickets — tenant-wide queue (all tickets visible to signed-in tenant users). */
 export const listHelpdeskTickets = async (req, res) => {
   let pool;
@@ -1478,6 +1493,7 @@ export const listHelpdeskTickets = async (req, res) => {
     const ctx = req.context || {};
     const tenantId = ctx.tenantId ?? null;
     const userId = ctx.userId ?? null;
+    const email = String(ctx.email || '').trim().toLowerCase();
     if (tenantId == null || userId == null) {
       return res.status(401).json({ ok: false, message: 'Sign in required to load helpdesk tickets.' });
     }
@@ -1486,15 +1502,47 @@ export const listHelpdeskTickets = async (req, res) => {
     const result = await pool
       .request()
       .input('tenantId', sql.Int, Number(tenantId))
+      .input('userId', sql.Int, Number(userId))
+      .input('email', sql.NVarChar, email)
       .query(`
-        SELECT payload
+        SELECT id, payload, tenant_id
         FROM dbo.saved_helpdesk_tickets
         WHERE tenant_id = @tenantId
+           OR owner_user_id IN (
+             SELECT id FROM dbo.user_profile WHERE tenant_id = @tenantId
+           )
+           OR (
+             @email <> ''
+             AND LOWER(LTRIM(RTRIM(ISNULL(JSON_VALUE(payload, '$.reporterEmail'), '')))) = @email
+           )
         ORDER BY updated_at DESC
       `);
-    const tickets = (result.recordset || [])
-      .map((row) => parsePayload(row.payload))
-      .filter((t) => t && typeof t.id === 'string');
+    const rows = result.recordset || [];
+    for (const row of rows) {
+      if (Number(row.tenant_id) !== Number(tenantId)) {
+        await pool
+          .request()
+          .input('id', sql.NVarChar, String(row.id))
+          .input('tenantId', sql.Int, Number(tenantId))
+          .query(`
+            UPDATE dbo.saved_helpdesk_tickets
+            SET tenant_id = @tenantId
+            WHERE id = @id
+          `);
+      }
+    }
+    const tickets = dedupeHelpdeskTicketsById(
+      rows
+        .map((row) => {
+          const parsed = parsePayload(row.payload);
+          if (!parsed || typeof parsed !== 'object') return null;
+          if (typeof parsed.id !== 'string' || !String(parsed.id).trim()) {
+            parsed.id = String(row.id || '').trim();
+          }
+          return parsed;
+        })
+        .filter((t) => t && typeof t.id === 'string' && String(t.id).trim())
+    );
     return res.json({ ok: true, tickets });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to list helpdesk tickets.';
@@ -1548,20 +1596,6 @@ export const syncHelpdeskTickets = async (req, res) => {
     const tickets = rawTickets.filter((t) => t && typeof t.id === 'string' && String(t.id).trim());
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const incomingIds = tickets.map((t) => String(t.id).trim());
-    const delReq = pool.request().input('tenantId', sql.Int, Number(tenantId));
-    if (incomingIds.length === 0) {
-      await delReq.query(`DELETE FROM dbo.saved_helpdesk_tickets WHERE tenant_id = @tenantId`);
-    } else {
-      incomingIds.forEach((id, idx) => {
-        delReq.input(`id${idx}`, sql.NVarChar, id);
-      });
-      const inList = incomingIds.map((_, idx) => `@id${idx}`).join(', ');
-      await delReq.query(`
-        DELETE FROM dbo.saved_helpdesk_tickets
-        WHERE tenant_id = @tenantId AND id NOT IN (${inList})
-      `);
-    }
     for (const ticket of tickets) {
       await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket);
     }
