@@ -8,6 +8,7 @@ import { closeControlSqlServer, connectToControlSqlServer } from './sqlserver.js
 import { getSqlServerTableDataForProfile } from '../connections/sqlServerSchema.js';
 import { getPostgresTableDataForProfile } from '../connections/postgresSchema.js';
 import { getMySqlTableData } from './sqlserverConnections.js';
+import { isPlatformSuperAdminEmail } from '../lib/platformSuperAdmin.js';
 
 const parsePayload = (raw) => {
   if (raw == null) return {};
@@ -1435,7 +1436,7 @@ export const saveWorkspaceGuardrailsCatalog = async (req, res) => {
 };
 
 /** Upsert one helpdesk ticket row (full JSON payload includes agent chat + resolution). */
-const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
+const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket, isOperator = false) => {
   const id = String(ticket?.id || '').trim();
   if (!id) return null;
   const updatedAt = Number(ticket.updatedAt) || Date.now();
@@ -1445,7 +1446,7 @@ const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
   const exists = await pool
     .request()
     .input('id', sql.NVarChar, id)
-    .query(`SELECT TOP 1 id FROM dbo.saved_helpdesk_tickets WHERE id = @id`);
+    .query(`SELECT TOP 1 id, tenant_id FROM dbo.saved_helpdesk_tickets WHERE id = @id`);
   const hdReq = pool
     .request()
     .input('id', sql.NVarChar, id)
@@ -1456,14 +1457,21 @@ const upsertHelpdeskTicketRow = async (pool, tenantId, userId, ticket) => {
   const hdUpdatedExpr = hdUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
   const hdCreatedExpr = hdUpdatedBigInt ? '@updatedAt' : 'SYSDATETIME()';
   if (exists.recordset?.length) {
-    await hdReq.query(`
-      UPDATE dbo.saved_helpdesk_tickets
-      SET tenant_id = @tenantId,
-          owner_user_id = @ownerUserId,
-          payload = @payload,
-          updated_at = ${hdUpdatedExpr}
-      WHERE id = @id
-    `);
+    if (isOperator) {
+      await hdReq.query(`
+        UPDATE dbo.saved_helpdesk_tickets
+        SET payload = @payload, updated_at = ${hdUpdatedExpr}
+        WHERE id = @id
+      `);
+    } else {
+      await hdReq.query(`
+        UPDATE dbo.saved_helpdesk_tickets
+        SET owner_user_id = @ownerUserId,
+            payload = @payload,
+            updated_at = ${hdUpdatedExpr}
+        WHERE id = @id AND tenant_id = @tenantId
+      `);
+    }
   } else {
     await hdReq.query(`
       INSERT INTO dbo.saved_helpdesk_tickets (id, tenant_id, owner_user_id, payload, updated_at, created_at)
@@ -1486,7 +1494,21 @@ const dedupeHelpdeskTicketsById = (tickets) => {
   return [...byId.values()].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
 };
 
-/** Helpdesk ICM tickets — tenant-wide queue (all tickets visible to signed-in tenant users). */
+const parseHelpdeskTicketRows = (rows) =>
+  dedupeHelpdeskTicketsById(
+    (rows || [])
+      .map((row) => {
+        const parsed = parsePayload(row.payload);
+        if (!parsed || typeof parsed !== 'object') return null;
+        if (typeof parsed.id !== 'string' || !String(parsed.id).trim()) {
+          parsed.id = String(row.id || '').trim();
+        }
+        return parsed;
+      })
+      .filter((t) => t && typeof t.id === 'string' && String(t.id).trim())
+  );
+
+/** Helpdesk ICM — niraj@xerocode.ai sees all tickets; other users see their tenant queue. */
 export const listHelpdeskTickets = async (req, res) => {
   let pool;
   try {
@@ -1497,53 +1519,25 @@ export const listHelpdeskTickets = async (req, res) => {
     if (tenantId == null || userId == null) {
       return res.status(401).json({ ok: false, message: 'Sign in required to load helpdesk tickets.' });
     }
+    const isOperator = isPlatformSuperAdminEmail(email);
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const result = await pool
-      .request()
-      .input('tenantId', sql.Int, Number(tenantId))
-      .input('userId', sql.Int, Number(userId))
-      .input('email', sql.NVarChar, email)
-      .query(`
-        SELECT id, payload, tenant_id
-        FROM dbo.saved_helpdesk_tickets
-        WHERE tenant_id = @tenantId
-           OR owner_user_id IN (
-             SELECT id FROM dbo.user_profile WHERE tenant_id = @tenantId
-           )
-           OR (
-             @email <> ''
-             AND LOWER(LTRIM(RTRIM(ISNULL(JSON_VALUE(payload, '$.reporterEmail'), '')))) = @email
-           )
-        ORDER BY updated_at DESC
-      `);
-    const rows = result.recordset || [];
-    for (const row of rows) {
-      if (Number(row.tenant_id) !== Number(tenantId)) {
-        await pool
+    const result = isOperator
+      ? await pool.request().query(`
+          SELECT id, payload, tenant_id
+          FROM dbo.saved_helpdesk_tickets
+          ORDER BY updated_at DESC
+        `)
+      : await pool
           .request()
-          .input('id', sql.NVarChar, String(row.id))
           .input('tenantId', sql.Int, Number(tenantId))
           .query(`
-            UPDATE dbo.saved_helpdesk_tickets
-            SET tenant_id = @tenantId
-            WHERE id = @id
+            SELECT id, payload, tenant_id
+            FROM dbo.saved_helpdesk_tickets
+            WHERE tenant_id = @tenantId
+            ORDER BY updated_at DESC
           `);
-      }
-    }
-    const tickets = dedupeHelpdeskTicketsById(
-      rows
-        .map((row) => {
-          const parsed = parsePayload(row.payload);
-          if (!parsed || typeof parsed !== 'object') return null;
-          if (typeof parsed.id !== 'string' || !String(parsed.id).trim()) {
-            parsed.id = String(row.id || '').trim();
-          }
-          return parsed;
-        })
-        .filter((t) => t && typeof t.id === 'string' && String(t.id).trim())
-    );
-    return res.json({ ok: true, tickets });
+    return res.json({ ok: true, tickets: parseHelpdeskTicketRows(result.recordset) });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to list helpdesk tickets.';
     return res.status(500).json({ ok: false, message });
@@ -1558,9 +1552,11 @@ export const saveHelpdeskTicketRecord = async (req, res) => {
     const ctx = req.context || {};
     const tenantId = ctx.tenantId ?? null;
     const userId = ctx.userId ?? null;
+    const email = String(ctx.email || '').trim().toLowerCase();
     if (tenantId == null || userId == null) {
       return res.status(401).json({ ok: false, message: 'Sign in required to save helpdesk tickets.' });
     }
+    const isOperator = isPlatformSuperAdminEmail(email);
     const body = req.body || {};
     const ticket = body.ticket ?? body;
     const id = String(ticket?.id || '').trim();
@@ -1569,7 +1565,19 @@ export const saveHelpdeskTicketRecord = async (req, res) => {
     }
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
-    const saved = await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket);
+    if (!isOperator) {
+      const existing = await pool
+        .request()
+        .input('id', sql.NVarChar, id)
+        .query(`SELECT TOP 1 tenant_id FROM dbo.saved_helpdesk_tickets WHERE id = @id`);
+      if (
+        existing.recordset?.length &&
+        Number(existing.recordset[0].tenant_id) !== Number(tenantId)
+      ) {
+        return res.status(403).json({ ok: false, message: 'Cannot modify tickets outside your tenant.' });
+      }
+    }
+    const saved = await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket, isOperator);
     if (!saved) {
       return res.status(400).json({ ok: false, message: 'Ticket id is required.' });
     }
@@ -1588,16 +1596,30 @@ export const syncHelpdeskTickets = async (req, res) => {
     const ctx = req.context || {};
     const tenantId = ctx.tenantId ?? null;
     const userId = ctx.userId ?? null;
+    const email = String(ctx.email || '').trim().toLowerCase();
     if (tenantId == null || userId == null) {
       return res.status(401).json({ ok: false, message: 'Sign in required to save helpdesk tickets.' });
     }
+    const isOperator = isPlatformSuperAdminEmail(email);
     const body = req.body || {};
     const rawTickets = Array.isArray(body.tickets) ? body.tickets : [];
     const tickets = rawTickets.filter((t) => t && typeof t.id === 'string' && String(t.id).trim());
     pool = await connectToControlSqlServer();
     await ensureSavedWorkspaceTables(pool);
     for (const ticket of tickets) {
-      await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket);
+      if (!isOperator) {
+        const existing = await pool
+          .request()
+          .input('id', sql.NVarChar, String(ticket.id).trim())
+          .query(`SELECT TOP 1 tenant_id FROM dbo.saved_helpdesk_tickets WHERE id = @id`);
+        if (
+          existing.recordset?.length &&
+          Number(existing.recordset[0].tenant_id) !== Number(tenantId)
+        ) {
+          continue;
+        }
+      }
+      await upsertHelpdeskTicketRow(pool, tenantId, userId, ticket, isOperator);
     }
     return res.json({ ok: true, count: tickets.length });
   } catch (error) {
