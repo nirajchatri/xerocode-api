@@ -47,6 +47,14 @@ import {
   syncHelpdeskTickets,
 } from './controlDb/sqlserverAppData.js';
 import {
+  deleteWebsiteProjectRecord,
+  listWebsiteProjects,
+  saveWebsiteProjectRecord,
+  saveWebsiteReactFilesRecord,
+  saveWebsiteHtmlProjectRecord,
+  resolveWebsiteReferences,
+} from './websiteBuilder.js';
+import {
   getPublicBuilderForm,
   getPublicBuilderFormFkLookup,
   getPublicBuilderFormTableData,
@@ -110,6 +118,13 @@ import {
   postBlueprintSlugMutate,
   syncApiBuilderSlugRoutes,
 } from './apiBuilderSlugRoutes.js';
+import {
+  deleteMarketplaceListing,
+  getMarketplaceListing,
+  getMarketplaceListingByResource,
+  listMarketplaceListings,
+  saveMarketplaceListing,
+} from './marketplaceListings.js';
 import { postAgentStudioWorkflowRun } from './agentStudioWorkflow.js';
 import { postAgentStudioMcpTest } from './agentStudioMcpTest.js';
 import { closeControlSqlServer, connectToControlSqlServer } from './controlDb/sqlserver.js';
@@ -246,6 +261,13 @@ apiRouter.get('/workspace/helpdesk-tickets', listHelpdeskTickets);
 apiRouter.post('/workspace/helpdesk-tickets', saveHelpdeskTicketRecord);
 apiRouter.put('/workspace/helpdesk-tickets', syncHelpdeskTickets);
 
+apiRouter.get('/workspace/websites', listWebsiteProjects);
+apiRouter.post('/workspace/websites', saveWebsiteProjectRecord);
+apiRouter.post('/workspace/websites/resolve-references', resolveWebsiteReferences);
+apiRouter.post('/workspace/websites/:id/react-files', saveWebsiteReactFilesRecord);
+apiRouter.post('/workspace/websites/:id/html-project', saveWebsiteHtmlProjectRecord);
+apiRouter.delete('/workspace/websites/:id', deleteWebsiteProjectRecord);
+
 /** Tenant user management — admins assign project view/edit access. */
 apiRouter.get('/tenant/me', getTenantMe);
 apiRouter.get('/tenant/my-access', getTenantMyAccess);
@@ -300,6 +322,13 @@ apiRouter.delete('/connections/:id/tables', enforcePublicApiJwtConnectionScope, 
 /** Signed Bearer JWT for external API docs / Postman (scoped to tenant + saved connection profile). */
 apiRouter.post('/public-api-token/issue', issuePublicApiBearerToken);
 apiRouter.get('/workspace/public-api-token', getStoredPublicApiBearerToken);
+
+/** Marketplace — public catalog + owner publish */
+apiRouter.get('/marketplace/listings', listMarketplaceListings);
+apiRouter.get('/marketplace/listings/by-resource/:resourceType/:resourceId', getMarketplaceListingByResource);
+apiRouter.get('/marketplace/listings/:id', getMarketplaceListing);
+apiRouter.post('/marketplace/listings', saveMarketplaceListing);
+apiRouter.delete('/marketplace/listings/:id', deleteMarketplaceListing);
 
 apiRouter.post('/api-builder/sync-slugs', syncApiBuilderSlugRoutes);
 apiRouter.get('/api-builder/published-routes', listPublishedBlueprintRoutes);

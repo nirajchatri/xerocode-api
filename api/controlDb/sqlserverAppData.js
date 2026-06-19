@@ -181,6 +181,26 @@ export const ensureSavedWorkspaceTables = async (pool) => {
     END
   `);
   await pool.request().query(`
+    IF OBJECT_ID(N'dbo.saved_website_projects', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.saved_website_projects (
+        id NVARCHAR(128) PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        name NVARCHAR(512) NOT NULL,
+        description NVARCHAR(MAX) NULL,
+        llm_provider NVARCHAR(64) NOT NULL,
+        llm_model NVARCHAR(128) NOT NULL,
+        folder_name NVARCHAR(256) NOT NULL,
+        selected_template_id NVARCHAR(64) NULL,
+        payload NVARCHAR(MAX) NOT NULL,
+        updated_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME())
+      );
+      CREATE INDEX idx_saved_website_projects_tenant ON dbo.saved_website_projects (tenant_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
     IF OBJECT_ID(N'dbo.workspace_guardrails_catalog', N'U') IS NULL
     BEGIN
       CREATE TABLE dbo.workspace_guardrails_catalog (

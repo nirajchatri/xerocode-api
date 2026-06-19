@@ -1,5 +1,6 @@
 node_modules
 dist
+generated-websites
 *.local
 .env
 npm-debug.log*
