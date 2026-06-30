@@ -1,6 +1,7 @@
 node_modules
 dist
 generated-websites
+public-website-previews
 *.local
 .env
 npm-debug.log*

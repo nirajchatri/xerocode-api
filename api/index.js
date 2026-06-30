@@ -47,14 +47,6 @@ import {
   syncHelpdeskTickets,
 } from './controlDb/sqlserverAppData.js';
 import {
-  deleteWebsiteProjectRecord,
-  listWebsiteProjects,
-  saveWebsiteProjectRecord,
-  saveWebsiteReactFilesRecord,
-  saveWebsiteHtmlProjectRecord,
-  resolveWebsiteReferences,
-} from './websiteBuilder.js';
-import {
   getPublicBuilderForm,
   getPublicBuilderFormFkLookup,
   getPublicBuilderFormTableData,
@@ -214,10 +206,10 @@ apiRouter.put('/builder-apps/:slug', updateBuilderPublicApp);
 apiRouter.get('/public/design-studio/:slug', getPublicDesignStudioPreview);
 apiRouter.post('/public/design-studio/:slug/chat', postPublicDesignStudioPreviewChat);
 apiRouter.get('/public/agents/:slug', getPublicAgentWorkflow);
+apiRouter.get('/public/builder-apps/:slug', getPublicBuilderApp);
 /** Marketing site CMS (SQL Server) — public read */
 apiRouter.get('/website/page', getPublicWebsitePage);
 apiRouter.get('/website/page/:slug', getPublicWebsitePage);
-apiRouter.get('/public/builder-apps/:slug', getPublicBuilderApp);
 apiRouter.get('/public/builder-apps/:slug/table-foreign-keys', getPublicBuilderAppTableForeignKeys);
 apiRouter.get('/public/builder-apps/:slug/fk-lookup', getPublicBuilderAppFkLookup);
 apiRouter.get('/public/builder-apps/:slug/table-data', getPublicBuilderAppTableData);
@@ -260,13 +252,6 @@ apiRouter.delete('/workspace/mcp-servers/:id', deleteMcpServerRecord);
 apiRouter.get('/workspace/helpdesk-tickets', listHelpdeskTickets);
 apiRouter.post('/workspace/helpdesk-tickets', saveHelpdeskTicketRecord);
 apiRouter.put('/workspace/helpdesk-tickets', syncHelpdeskTickets);
-
-apiRouter.get('/workspace/websites', listWebsiteProjects);
-apiRouter.post('/workspace/websites', saveWebsiteProjectRecord);
-apiRouter.post('/workspace/websites/resolve-references', resolveWebsiteReferences);
-apiRouter.post('/workspace/websites/:id/react-files', saveWebsiteReactFilesRecord);
-apiRouter.post('/workspace/websites/:id/html-project', saveWebsiteHtmlProjectRecord);
-apiRouter.delete('/workspace/websites/:id', deleteWebsiteProjectRecord);
 
 /** Tenant user management — admins assign project view/edit access. */
 apiRouter.get('/tenant/me', getTenantMe);

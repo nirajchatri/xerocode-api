@@ -652,16 +652,22 @@ export const changePassword = async (req, res) => {
   }
 };
 
-export const getUserProfile = async (_req, res) => {
+export const getUserProfile = async (req, res) => {
+  const ctx = req.context || {};
+  const email = String(ctx.email || '').trim().toLowerCase();
+  if (!email) {
+    return res.status(401).json({ ok: false, message: 'Sign in required.' });
+  }
+
   let pool;
   try {
     pool = await connectToControlSqlServer();
     await ensureSqlServerAuthTables(pool);
-    const result = await pool.request().query(`
+    const result = await pool.request().input('email', sql.NVarChar, email).query(`
       SELECT TOP 1 id, full_name, email, phone, company, role_title, bio, avatar_url,
         slack_url, discord_url, linkedin_url, x_url
       FROM dbo.user_profile
-      ORDER BY updated_at DESC, id DESC
+      WHERE email = @email
     `);
     if (result.recordset?.length) {
       const row = result.recordset[0];
@@ -709,9 +715,19 @@ export const getUserProfile = async (_req, res) => {
 };
 
 export const saveUserProfile = async (req, res) => {
+  const ctx = req.context || {};
+  const email = String(ctx.email || '').trim().toLowerCase();
+  if (!email) {
+    return res.status(401).json({ ok: false, message: 'Sign in required.' });
+  }
+
   const body = req.body ?? {};
+  const bodyEmail = String(body.email ?? '').trim().toLowerCase();
+  if (bodyEmail && bodyEmail !== email) {
+    return res.status(403).json({ ok: false, message: 'Cannot update another user profile.' });
+  }
+
   const fullName = String(body.fullName ?? '').trim();
-  const email = String(body.email ?? '').trim().toLowerCase();
   const phone = String(body.phone ?? '').trim();
   const company = String(body.company ?? '').trim();
   const roleTitle = String(body.roleTitle ?? '').trim();
@@ -722,7 +738,6 @@ export const saveUserProfile = async (req, res) => {
   const linkedinUrl = String(body.linkedinUrl ?? '').trim();
   const xUrl = String(body.xUrl ?? '').trim();
   if (!fullName) return res.status(400).json({ ok: false, message: 'Full name is required.' });
-  if (!email) return res.status(400).json({ ok: false, message: 'Email is required.' });
 
   let pool;
   try {

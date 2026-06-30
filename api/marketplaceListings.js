@@ -8,7 +8,6 @@ const VALID_RESOURCE_TYPES = new Set([
   'dashboard',
   'api',
   'automation',
-  'website',
   'mcp_server',
   'integration_tool',
   'webhook',
@@ -22,7 +21,6 @@ const VALID_CATEGORIES = new Set([
   'integration-tools',
   'webhooks',
   'dashboard-templates',
-  'web-templates',
 ]);
 
 const RESOURCE_TO_CATEGORY = {
@@ -31,13 +29,13 @@ const RESOURCE_TO_CATEGORY = {
   dashboard: 'dashboard-templates',
   api: 'apis',
   automation: 'integration-tools',
-  website: 'web-templates',
   mcp_server: 'mcp-servers',
   integration_tool: 'integration-tools',
   webhook: 'webhooks',
 };
 
 const VALID_PRICING_TYPES = new Set(['free', 'paid']);
+const MAX_APPLICATION_IMAGE_CHARS = 3_500_000;
 
 export const ensureMarketplaceTables = async (pool) => {
   await pool.request().query(`
@@ -57,6 +55,7 @@ export const ensureMarketplaceTables = async (pool) => {
         price_amount DECIMAL(18,2) NULL,
         currency NVARCHAR(3) NULL DEFAULT 'USD',
         listing_payload NVARCHAR(MAX) NULL,
+        application_image NVARCHAR(MAX) NULL,
         published_at BIGINT NULL,
         updated_at BIGINT NOT NULL,
         created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME()),
@@ -66,28 +65,72 @@ export const ensureMarketplaceTables = async (pool) => {
         ON dbo.marketplace_public_listings (is_public, category, updated_at DESC);
     END
   `);
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.marketplace_public_listings', 'application_image') IS NULL
+    BEGIN
+      ALTER TABLE dbo.marketplace_public_listings ADD application_image NVARCHAR(MAX) NULL;
+    END
+  `);
+};
+
+const LISTING_SELECT_COLUMNS = `
+  id, resource_type, resource_id, tenant_id, owner_user_id, title, description,
+  category, is_public, pricing_type, price_amount, currency, listing_payload,
+  application_image, published_at, updated_at, created_at
+`;
+
+const extractApplicationImage = (body, listingPayload) => {
+  const fromBody = typeof body?.applicationImage === 'string' ? body.applicationImage.trim() : '';
+  const fromPayload =
+    listingPayload && typeof listingPayload === 'object' && typeof listingPayload.imageUrl === 'string'
+      ? listingPayload.imageUrl.trim()
+      : '';
+  const image = fromBody || fromPayload || null;
+  if (image && image.length > MAX_APPLICATION_IMAGE_CHARS) {
+    throw new Error('Application image is too large.');
+  }
+  return image;
+};
+
+const mergeListingPayloadWithImage = (listingPayload, applicationImage) => {
+  const base =
+    listingPayload && typeof listingPayload === 'object' && !Array.isArray(listingPayload)
+      ? { ...listingPayload }
+      : {};
+  if (applicationImage) {
+    base.imageUrl = applicationImage;
+  } else if ('imageUrl' in base) {
+    delete base.imageUrl;
+  }
+  return Object.keys(base).length > 0 ? base : null;
 };
 
 const newListingId = () => `mkt-${crypto.randomBytes(12).toString('hex')}`;
 
-const rowToListing = (row) => ({
-  id: String(row.id),
-  resourceType: String(row.resource_type),
-  resourceId: String(row.resource_id),
-  tenantId: Number(row.tenant_id),
-  ownerUserId: Number(row.owner_user_id),
-  title: String(row.title || ''),
-  description: row.description != null ? String(row.description) : '',
-  category: String(row.category || ''),
-  isPublic: Boolean(row.is_public),
-  pricingType: String(row.pricing_type || 'free'),
-  priceAmount: row.price_amount != null ? Number(row.price_amount) : null,
-  currency: row.currency != null ? String(row.currency) : 'USD',
-  listingPayload: row.listing_payload ? JSON.parse(String(row.listing_payload)) : null,
-  publishedAt: row.published_at != null ? Number(row.published_at) : null,
-  updatedAt: Number(row.updated_at || Date.now()),
-  createdAt: Number(row.created_at || Date.now()),
-});
+const rowToListing = (row) => {
+  const applicationImage = row.application_image != null ? String(row.application_image) : null;
+  let listingPayload = row.listing_payload ? JSON.parse(String(row.listing_payload)) : null;
+  listingPayload = mergeListingPayloadWithImage(listingPayload, applicationImage);
+  return {
+    id: String(row.id),
+    resourceType: String(row.resource_type),
+    resourceId: String(row.resource_id),
+    tenantId: Number(row.tenant_id),
+    ownerUserId: Number(row.owner_user_id),
+    title: String(row.title || ''),
+    description: row.description != null ? String(row.description) : '',
+    category: String(row.category || ''),
+    isPublic: Boolean(row.is_public),
+    pricingType: String(row.pricing_type || 'free'),
+    priceAmount: row.price_amount != null ? Number(row.price_amount) : null,
+    currency: row.currency != null ? String(row.currency) : 'USD',
+    listingPayload,
+    applicationImage,
+    publishedAt: row.published_at != null ? Number(row.published_at) : null,
+    updatedAt: Number(row.updated_at || Date.now()),
+    createdAt: Number(row.created_at || Date.now()),
+  };
+};
 
 const publicListingShape = (listing) => ({
   id: listing.id,
@@ -100,6 +143,7 @@ const publicListingShape = (listing) => ({
   priceAmount: listing.priceAmount,
   currency: listing.currency,
   listingPayload: listing.listingPayload,
+  applicationImage: listing.applicationImage ?? null,
   publishedAt: listing.publishedAt,
   updatedAt: listing.updatedAt,
 });
@@ -243,27 +287,6 @@ const extractApiMeta = (payload) => {
   };
 };
 
-const extractWebsiteMeta = (row, payload) => {
-  const pages = Array.isArray(payload?.pages) ? payload.pages : [];
-  const home = pages.find((p) => p?.slug === 'home' || p?.slug === '/') || pages[0];
-  const previewHtml = home?.html ? String(home.html).slice(0, 120_000) : '';
-  return {
-    llmProviders: uniqueStrings([row?.llm_provider || payload?.llmProvider]),
-    llmModels: uniqueStrings([row?.llm_model || payload?.llmModel]),
-    datasourceSchemas: [],
-    datasourceLabel: null,
-    connectorType: null,
-    apis: [],
-    snapshot: {
-      kind: 'website',
-      pageCount: pages.length,
-      templateId: row?.selected_template_id ? String(row.selected_template_id) : null,
-      previewHtml,
-      pageTitles: pages.map((p) => String(p?.title || p?.slug || 'Page')).slice(0, 12),
-    },
-  };
-};
-
 async function loadOwnerProfile(pool, userId) {
   const rs = await pool
     .request()
@@ -348,19 +371,6 @@ async function resolveListingDetail(pool, listing) {
       const payload = parseJson(rs.recordset?.[0]?.payload);
       return { ...base, ...extractApiMeta(payload) };
     }
-    if (resourceType === 'website') {
-      const rs = await pool
-        .request()
-        .input('id', sql.NVarChar, resourceId)
-        .input('tenantId', sql.Int, Number(tenantId))
-        .query(`
-          SELECT TOP 1 name, description, llm_provider, llm_model, selected_template_id, payload
-          FROM dbo.saved_website_projects WHERE id = @id AND tenant_id = @tenantId
-        `);
-      const row = rs.recordset?.[0];
-      const payload = parseJson(row?.payload);
-      return { ...base, ...extractWebsiteMeta(row, payload) };
-    }
   } catch (err) {
     console.error('resolveListingDetail:', err);
   }
@@ -376,6 +386,15 @@ async function resolveListingDetail(pool, listing) {
       connectorType: lp.connectorType || base.connectorType,
       apis: uniqueStrings(lp.apis || base.apis),
       snapshot: lp.snapshot || base.snapshot,
+    };
+  }
+  if (listing.applicationImage) {
+    return {
+      ...base,
+      snapshot: {
+        ...(base.snapshot && typeof base.snapshot === 'object' ? base.snapshot : { kind: 'generic' }),
+        imageUrl: listing.applicationImage,
+      },
     };
   }
   return base;
@@ -395,9 +414,7 @@ export const listMarketplaceListings = async (req, res) => {
       where += ' AND category = @category';
     }
     const result = await rq.query(`
-      SELECT id, resource_type, resource_id, tenant_id, owner_user_id, title, description,
-             category, is_public, pricing_type, price_amount, currency, listing_payload,
-             published_at, updated_at, created_at
+      SELECT ${LISTING_SELECT_COLUMNS}
       FROM dbo.marketplace_public_listings
       WHERE ${where}
       ORDER BY updated_at DESC
@@ -424,9 +441,7 @@ export const getMarketplaceListing = async (req, res) => {
       .request()
       .input('id', sql.NVarChar, id)
       .query(`
-        SELECT id, resource_type, resource_id, tenant_id, owner_user_id, title, description,
-               category, is_public, pricing_type, price_amount, currency, listing_payload,
-               published_at, updated_at, created_at
+        SELECT ${LISTING_SELECT_COLUMNS}
         FROM dbo.marketplace_public_listings
         WHERE id = @id AND is_public = 1
       `);
@@ -467,9 +482,7 @@ export const getMarketplaceListingByResource = async (req, res) => {
       .input('tenantId', sql.Int, Number(tenantId))
       .input('userId', sql.Int, Number(userId))
       .query(`
-        SELECT id, resource_type, resource_id, tenant_id, owner_user_id, title, description,
-               category, is_public, pricing_type, price_amount, currency, listing_payload,
-               published_at, updated_at, created_at
+        SELECT ${LISTING_SELECT_COLUMNS}
         FROM dbo.marketplace_public_listings
         WHERE resource_type = @resourceType AND resource_id = @resourceId
           AND tenant_id = @tenantId AND owner_user_id = @userId
@@ -511,7 +524,9 @@ export const saveMarketplaceListing = async (req, res) => {
       body.category && VALID_CATEGORIES.has(body.category)
         ? body.category
         : RESOURCE_TO_CATEGORY[resourceType] || 'applications';
-    const listingPayload = body.listingPayload ?? null;
+    const listingPayloadRaw = body.listingPayload ?? null;
+    const applicationImage = extractApplicationImage(body, listingPayloadRaw);
+    const listingPayload = mergeListingPayloadWithImage(listingPayloadRaw, applicationImage);
 
     if (!VALID_RESOURCE_TYPES.has(resourceType)) {
       return res.status(400).json({ ok: false, message: 'Invalid resource type.' });
@@ -565,6 +580,7 @@ export const saveMarketplaceListing = async (req, res) => {
       .input('priceAmount', sql.Decimal(18, 2), priceAmount)
       .input('currency', sql.NVarChar, currency)
       .input('listingPayload', sql.NVarChar(sql.MAX), listingPayload ? JSON.stringify(listingPayload) : null)
+      .input('applicationImage', sql.NVarChar(sql.MAX), applicationImage)
       .input('updatedAt', sql.BigInt, now);
 
     if (existingRow) {
@@ -575,7 +591,8 @@ export const saveMarketplaceListing = async (req, res) => {
         UPDATE dbo.marketplace_public_listings
         SET title = @title, description = @description, category = @category,
             is_public = @isPublic, pricing_type = @pricingType, price_amount = @priceAmount,
-            currency = @currency, listing_payload = @listingPayload, updated_at = @updatedAt
+            currency = @currency, listing_payload = @listingPayload,
+            application_image = @applicationImage, updated_at = @updatedAt
         WHERE id = @id
       `);
     } else {
@@ -586,11 +603,11 @@ export const saveMarketplaceListing = async (req, res) => {
           INSERT INTO dbo.marketplace_public_listings (
             id, resource_type, resource_id, tenant_id, owner_user_id, title, description,
             category, is_public, pricing_type, price_amount, currency, listing_payload,
-            published_at, updated_at, created_at
+            application_image, published_at, updated_at, created_at
           ) VALUES (
             @id, @resourceType, @resourceId, @tenantId, @ownerUserId, @title, @description,
             @category, @isPublic, @pricingType, @priceAmount, @currency, @listingPayload,
-            @publishedAt, @updatedAt, @createdAt
+            @applicationImage, @publishedAt, @updatedAt, @createdAt
           )
         `);
     }
@@ -609,25 +626,30 @@ export const saveMarketplaceListing = async (req, res) => {
       priceAmount,
       currency,
       listingPayload: listingPayload || null,
+      applicationImage,
       publishedAt: publishedAt ?? now,
       updatedAt: now,
       createdAt: now,
     };
     try {
       const detail = await resolveListingDetail(pool, storedListing);
-      const enrichedPayload = {
-        snapshot: detail.snapshot,
-        llmProviders: detail.llmProviders,
-        llmModels: detail.llmModels,
-        datasourceSchemas: detail.datasourceSchemas,
-        datasourceLabel: detail.datasourceLabel,
-        connectorType: detail.connectorType,
-        apis: detail.apis,
-      };
+      const enrichedPayload = mergeListingPayloadWithImage(
+        {
+          ...(listingPayload && typeof listingPayload === 'object' ? listingPayload : {}),
+          snapshot: detail.snapshot,
+          llmProviders: detail.llmProviders,
+          llmModels: detail.llmModels,
+          datasourceSchemas: detail.datasourceSchemas,
+          datasourceLabel: detail.datasourceLabel,
+          connectorType: detail.connectorType,
+          apis: detail.apis,
+        },
+        applicationImage
+      );
       await pool
         .request()
         .input('id', sql.NVarChar, id)
-        .input('payload', sql.NVarChar(sql.MAX), JSON.stringify(enrichedPayload))
+        .input('payload', sql.NVarChar(sql.MAX), enrichedPayload ? JSON.stringify(enrichedPayload) : null)
         .query(`UPDATE dbo.marketplace_public_listings SET listing_payload = @payload WHERE id = @id`);
     } catch (enrichErr) {
       console.error('marketplace listing_payload enrich:', enrichErr);

@@ -13,8 +13,8 @@ const { host, port } = resolveLocalListenConfig();
 
 app.use(cors());
 /** Default express.json() limit (~100kb) rejects multimodal chat payloads (base64 images). */
-app.use(express.json({ limit: '40mb' }));
-app.use(express.urlencoded({ extended: true, limit: '40mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.get('/', (_req, res) => {
   res.redirect(308, '/api/health');
 });
@@ -25,7 +25,8 @@ app.use((err, _req, res, _next) => {
   if (res.headersSent) {
     return;
   }
-  res.status(500).json({ ok: false, message });
+  const status = /entity too large/i.test(message) ? 413 : 500;
+  res.status(status).json({ ok: false, message });
 });
 
 const bootstrapControlDb = async () => {

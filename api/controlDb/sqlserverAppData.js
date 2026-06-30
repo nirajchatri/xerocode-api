@@ -103,6 +103,23 @@ export const ensureSavedWorkspaceTables = async (pool) => {
     END
   `);
   await pool.request().query(`
+    IF OBJECT_ID(N'dbo.website_builder_public_previews', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.website_builder_public_previews (
+        slug NVARCHAR(80) NOT NULL PRIMARY KEY,
+        tenant_id INT NOT NULL,
+        owner_user_id INT NOT NULL,
+        website_id NVARCHAR(64) NOT NULL,
+        title NVARCHAR(512) NOT NULL,
+        payload_json NVARCHAR(MAX) NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME()),
+        updated_at BIGINT NOT NULL
+      );
+      CREATE INDEX idx_website_builder_public_previews_owner ON dbo.website_builder_public_previews (tenant_id, owner_user_id, updated_at DESC);
+      CREATE INDEX idx_website_builder_public_previews_website ON dbo.website_builder_public_previews (website_id, updated_at DESC);
+    END
+  `);
+  await pool.request().query(`
     IF OBJECT_ID(N'dbo.builder_public_forms', N'U') IS NULL
     BEGIN
       CREATE TABLE dbo.builder_public_forms (

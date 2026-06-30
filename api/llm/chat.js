@@ -1,6 +1,42 @@
 import sql from 'mssql';
 import { closeControlSqlServer, connectToControlSqlServer } from '../controlDb/sqlserver.js';
 
+/** Retired Anthropic model IDs → current supported replacements. */
+const ANTHROPIC_MODEL_ALIASES = {
+  'claude-3-5-sonnet-20241022': 'claude-sonnet-4-6',
+  'claude-3-5-sonnet-20240620': 'claude-sonnet-4-6',
+  'claude-3-5-sonnet-latest': 'claude-sonnet-4-6',
+  'claude-3-7-sonnet-20250219': 'claude-sonnet-4-6',
+  'claude-3-7-sonnet-latest': 'claude-sonnet-4-6',
+  'claude-sonnet-4-20250514': 'claude-sonnet-4-6',
+  'claude-3-5-haiku-20241022': 'claude-haiku-4-5-20251001',
+  'claude-3-5-haiku-latest': 'claude-haiku-4-5-20251001',
+  'claude-3-opus-20240229': 'claude-opus-4-6',
+  'claude-opus-4-20250514': 'claude-opus-4-6',
+};
+
+function resolveAnthropicModel(model) {
+  const trimmed = String(model || '').trim();
+  if (!trimmed) return 'claude-sonnet-4-6';
+  return ANTHROPIC_MODEL_ALIASES[trimmed] || trimmed;
+}
+
+function normalizeProviderBaseUrl(baseUrl, fallback) {
+  const raw = String(baseUrl || '').trim() || fallback;
+  return raw.replace(/\/+$/, '');
+}
+
+function anthropicErrorMessage(payload, fallback) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  if (typeof payload.error?.message === 'string' && payload.error.message.trim()) {
+    return payload.error.message.trim();
+  }
+  if (typeof payload.message === 'string' && payload.message.trim()) {
+    return payload.message.trim();
+  }
+  return fallback;
+}
+
 function normalizeImageAttachments(raw) {
   if (!Array.isArray(raw)) return [];
   const allowedMime = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -182,7 +218,8 @@ export const chatWithLlm = async (req, res) => {
       if (!key) {
         throw new Error('ANTHROPIC_API_KEY is missing.');
       }
-      const base = configuredBaseUrl || 'https://api.anthropic.com';
+      const base = normalizeProviderBaseUrl(configuredBaseUrl, 'https://api.anthropic.com');
+      const anthropicModel = resolveAnthropicModel(configuredModel);
       const r = await fetch(`${base}/v1/messages`, {
         method: 'POST',
         headers: {
@@ -191,7 +228,7 @@ export const chatWithLlm = async (req, res) => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          model: configuredModel,
+          model: anthropicModel,
           max_tokens: maxTokens,
           temperature: expectJson ? 0.2 : 0.4,
           system: systemPrompt,
@@ -218,7 +255,7 @@ export const chatWithLlm = async (req, res) => {
       const j = await r.json().catch(() => ({}));
       const text = String(j?.content?.[0]?.text || '').trim();
       if (!r.ok || !text) {
-        throw new Error(j?.error?.message || 'Anthropic model failed to generate response.');
+        throw new Error(anthropicErrorMessage(j, 'Anthropic model failed to generate response.'));
       }
       return res.json({ ok: true, reply: text });
     }
@@ -324,7 +361,8 @@ export const testLlmConfig = async (req, res) => {
     }
 
     if (provider === 'anthropic') {
-      const base = baseUrl || 'https://api.anthropic.com';
+      const base = normalizeProviderBaseUrl(baseUrl, 'https://api.anthropic.com');
+      const anthropicModel = resolveAnthropicModel(model);
       const r = await fetch(`${base}/v1/messages`, {
         method: 'POST',
         headers: {
@@ -333,16 +371,26 @@ export const testLlmConfig = async (req, res) => {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          model,
-          max_tokens: 8,
+          model: anthropicModel,
+          max_tokens: 16,
           messages: [{ role: 'user', content: 'Respond with: OK' }],
         }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
-        throw new Error(j?.error?.message || 'Anthropic test failed.');
+        throw new Error(anthropicErrorMessage(j, 'Anthropic test failed.'));
       }
-      return res.json({ ok: true, message: 'Anthropic connection successful.' });
+      const text = String(j?.content?.[0]?.text || '').trim();
+      if (!text) {
+        throw new Error(anthropicErrorMessage(j, 'Anthropic test returned an empty response.'));
+      }
+      return res.json({
+        ok: true,
+        message:
+          anthropicModel !== model
+            ? `Anthropic connection successful (mapped retired model "${model}" → "${anthropicModel}").`
+            : 'Anthropic connection successful.',
+      });
     }
 
     if (provider === 'deepseek') {
